@@ -312,19 +312,9 @@ st.markdown(
 # JUDUL
 # =========================
 st.markdown(
-
         <h1>
-            Deteksi T2DM dari Citra Lidah
+            "Deteksi T2DM dari Citra Lidah"
         </h1>
-
-        <p>
-            Unggah citra lidah, kemudian tekan
-            <b>Deteksi</b>
-            untuk mendapatkan hasil klasifikasi
-            Diabetes atau Non-Diabetes.
-        </p>
-
-    ,
     unsafe_allow_html=True
 )
 

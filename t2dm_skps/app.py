@@ -313,8 +313,6 @@ st.markdown(
 # =========================
 st.markdown(
 
-    <div class="hero">
-
         <h1>
             Deteksi T2DM dari Citra Lidah
         </h1>
@@ -326,7 +324,6 @@ st.markdown(
             Diabetes atau Non-Diabetes.
         </p>
 
-    </div>
     ,
     unsafe_allow_html=True
 )

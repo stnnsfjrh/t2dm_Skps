@@ -49,7 +49,10 @@ def preprocess(file_bytes):
         method="bilinear"
     )
 
-    img = tf.cast(img, tf.float32)
+    img = tf.cast(
+        img,
+        tf.float32
+    )
 
     return img
 
@@ -93,7 +96,7 @@ st.set_page_config(
 
 
 # =========================
-# CSS
+# CSS TAMPILAN
 # =========================
 st.markdown(
     """
@@ -121,43 +124,6 @@ st.markdown(
         max-width: 760px;
         padding-top: 3rem;
         padding-bottom: 3rem;
-    }
-
-
-    .hero {
-        text-align: center;
-        margin-bottom: 1.6rem;
-    }
-
-
-    .hero h1 {
-        margin: 0;
-
-        font-size: 2.25rem;
-        font-weight: 750;
-
-        background: linear-gradient(
-            90deg,
-            #64b5f6,
-            #ff6b6b
-        );
-
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-
-
-    .hero p {
-        max-width: 590px;
-
-        margin:
-            0.8rem auto
-            0;
-
-        color: #cbd5e1;
-
-        font-size: 0.96rem;
-        line-height: 1.65;
     }
 
 
@@ -215,89 +181,6 @@ st.markdown(
     }
 
 
-    .result-card {
-        margin-top: 1.35rem;
-
-        padding: 1.6rem;
-
-        text-align: center;
-
-        background:
-            rgba(
-                8,
-                20,
-                45,
-                0.82
-            );
-
-        border:
-            1px solid
-            rgba(
-                255,
-                255,
-                255,
-                0.13
-            );
-
-        border-radius: 16px;
-
-        box-shadow:
-            0 14px 35px
-            rgba(
-                0,
-                0,
-                0,
-                0.18
-            );
-    }
-
-
-    .result-title {
-        color: #94a3b8;
-
-        font-size: 0.78rem;
-        font-weight: 700;
-
-        letter-spacing: 0.12em;
-    }
-
-
-    .result-label {
-        margin-top: 0.45rem;
-
-        color: white;
-
-        font-size: 2rem;
-        font-weight: 750;
-    }
-
-
-    .result-confidence {
-        margin-top: 0.25rem;
-
-        font-size: 2.5rem;
-        font-weight: 800;
-
-        background: linear-gradient(
-            90deg,
-            #64b5f6,
-            #ff6b6b
-        );
-
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-
-
-    .result-description {
-        margin-top: 0.25rem;
-
-        color: #9fb0c7;
-
-        font-size: 0.82rem;
-    }
-
-
     header {
         background: transparent !important;
     }
@@ -311,7 +194,9 @@ st.markdown(
 # =========================
 # JUDUL
 # =========================
-st.title("Deteksi T2DM dari Citra Lidah")
+st.title(
+    "Deteksi T2DM dari Citra Lidah"
+)
 
 st.write(
     "Unggah citra lidah, kemudian tekan tombol **Deteksi** "
@@ -353,7 +238,9 @@ if uploaded is not None:
     ).convert("RGB")
 
 
-    # Tampilkan gambar
+    # =========================
+    # TAMPILKAN GAMBAR
+    # =========================
     st.image(
         display_img,
         caption="Citra yang diunggah",
@@ -361,7 +248,9 @@ if uploaded is not None:
     )
 
 
-    # Tombol deteksi
+    # =========================
+    # TOMBOL DETEKSI
+    # =========================
     detect_button = st.button(
         "Deteksi",
         type="primary",
@@ -391,14 +280,17 @@ if uploaded is not None:
 
 
         # =========================
-        # HASIL
+        # HASIL DETEKSI
         # =========================
-       st.subheader("Hasil Deteksi")
+        st.subheader(
+            "Hasil Deteksi"
+        )
 
         st.success(
             f"Hasil Klasifikasi: {CLASS_NAMES[label]}"
         )
 
         st.write(
-            f"**Tingkat Keyakinan Model: {confidence * 100:.2f}%**"
+            f"**Tingkat Keyakinan Model: "
+            f"{confidence * 100:.2f}%**"
         )

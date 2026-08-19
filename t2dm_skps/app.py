@@ -32,9 +32,9 @@ st.markdown(
     <style>
     /* Background aplikasi gradasi biru ke merah */
     .stApp {
-        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 35%, #9a1f40 70%, #d31027 100%);
+        background: linear-gradient(135deg, 1e3c72 0%, 2a5298 35%, 9a1f40 70%, d31027 100%);
         background-attachment: fixed;
-        color: #ffffff;
+        color: ffffff;
     }
 
     /* Memusatkan teks judul dan paragraf */

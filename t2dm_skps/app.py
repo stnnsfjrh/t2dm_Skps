@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+import numpy as np
 import streamlit as st
 import tensorflow as tf
 from PIL import Image
@@ -35,6 +37,7 @@ def load_model():
 # PREPROCESSING GAMBAR
 # =========================
 def preprocess(file_bytes):
+
     img = tf.io.decode_image(
         file_bytes,
         channels=3,
@@ -83,6 +86,193 @@ def predict(model, image):
         confidence = 1 - probability
 
     return label, confidence
+
+
+# =========================
+# MENCARI FEATURE LAYER
+# TERAKHIR UNTUK GRAD-CAM
+# =========================
+def last_feature_layer(base_model):
+
+    for layer in reversed(base_model.layers):
+
+        try:
+            if len(layer.output.shape) == 4:
+                return layer
+
+        except Exception:
+            pass
+
+    raise ValueError(
+        "Layer feature map 4D tidak ditemukan."
+    )
+
+
+# =========================
+# GRAD-CAM
+# =========================
+def gradcam(model, image):
+
+    batch = image[None, ...]
+
+    # Mengambil layer dari model
+    augmentation = model.get_layer(
+        "augmentation_efficientnetb0"
+    )
+
+    base_model = model.get_layer(
+        "efficientnetb0_base"
+    )
+
+    gap = model.get_layer(
+        "gap_efficientnetb0"
+    )
+
+    dropout = model.get_layer(
+        "dropout_efficientnetb0"
+    )
+
+    classifier = model.get_layer(
+        "classifier"
+    )
+
+    # Cari feature map terakhir
+    target_layer = last_feature_layer(
+        base_model
+    )
+
+    # Model sementara untuk mendapatkan:
+    # 1. feature map target
+    # 2. output EfficientNetB0
+    feature_model = keras.Model(
+        base_model.input,
+        [
+            target_layer.output,
+            base_model.output
+        ]
+    )
+
+    # =========================
+    # HITUNG GRADIENT
+    # =========================
+    with tf.GradientTape() as tape:
+
+        x = augmentation(
+            batch,
+            training=False
+        )
+
+        conv_output, features = feature_model(
+            x,
+            training=False
+        )
+
+        x = gap(features)
+
+        x = dropout(
+            x,
+            training=False
+        )
+
+        probability = classifier(x)[:, 0]
+
+        predicted_label = tf.cast(
+            probability >= THRESHOLD,
+            tf.int32
+        )
+
+        # Score disesuaikan dengan kelas
+        # yang diprediksi model
+        score = tf.where(
+            predicted_label == 1,
+            probability,
+            1 - probability
+        )
+
+    # Gradient terhadap feature map
+    gradients = tape.gradient(
+        score,
+        conv_output
+    )
+
+    # Bobot setiap channel
+    weights = tf.reduce_mean(
+        gradients,
+        axis=(1, 2)
+    )
+
+    # Membentuk heatmap
+    heatmap = tf.reduce_sum(
+        conv_output *
+        weights[:, None, None, :],
+        axis=-1
+    )
+
+    # Hilangkan nilai negatif
+    heatmap = tf.nn.relu(
+        heatmap
+    )
+
+    # Normalisasi 0-1
+    heatmap = heatmap / (
+        tf.reduce_max(
+            heatmap,
+            axis=(1, 2),
+            keepdims=True
+        )
+        +
+        tf.keras.backend.epsilon()
+    )
+
+    return (
+        heatmap[0].numpy(),
+        target_layer.name
+    )
+
+
+# =========================
+# MEMBUAT HEATMAP DAN OVERLAY
+# =========================
+def make_overlay(
+    image,
+    heatmap,
+    alpha=0.4
+):
+
+    # Resize heatmap sesuai ukuran gambar
+    heatmap = tf.image.resize(
+        heatmap[..., None],
+        IMG_SIZE
+    ).numpy().squeeze()
+
+    # Memberikan warna pada heatmap
+    colored_heatmap = plt.get_cmap(
+        "jet"
+    )(
+        np.clip(
+            heatmap,
+            0,
+            1
+        )
+    )[..., :3]
+
+    # Normalisasi gambar asli
+    original = np.clip(
+        image / 255.0,
+        0,
+        1
+    )
+
+    # Gabungkan gambar asli + heatmap
+    overlay = np.clip(
+        (1 - alpha) * original
+        +
+        alpha * colored_heatmap,
+        0,
+        1
+    )
+
+    return colored_heatmap, overlay
 
 
 # =========================
@@ -267,15 +457,30 @@ if uploaded is not None:
             "Sedang melakukan deteksi..."
         ):
 
+            # Load model
             model = load_model()
 
+            # Preprocessing
             image = preprocess(
                 file_bytes
             )
 
+            # Prediksi
             label, confidence = predict(
                 model,
                 image
+            )
+
+            # Grad-CAM
+            heatmap, layer_name = gradcam(
+                model,
+                image
+            )
+
+            # Membuat visualisasi
+            colored_heatmap, overlay = make_overlay(
+                image.numpy(),
+                heatmap
             )
 
 
@@ -293,4 +498,73 @@ if uploaded is not None:
         st.write(
             f"**Tingkat Keyakinan Model: "
             f"{confidence * 100:.2f}%**"
+        )
+
+
+        # =========================
+        # HASIL GRAD-CAM
+        # =========================
+        st.subheader(
+            "Analisis Grad-CAM"
+        )
+
+        st.write(
+            "Grad-CAM menunjukkan bagian citra yang relatif "
+            "memberikan kontribusi terhadap keputusan model."
+        )
+
+
+        # =========================
+        # TAMPILKAN 3 GAMBAR
+        # =========================
+        col1, col2, col3 = st.columns(3)
+
+
+        # Gambar asli
+        with col1:
+
+            st.image(
+                np.clip(
+                    image.numpy() / 255.0,
+                    0,
+                    1
+                ),
+                caption="Citra Asli",
+                use_container_width=True
+            )
+
+
+        # Heatmap
+        with col2:
+
+            st.image(
+                colored_heatmap,
+                caption="Heatmap Grad-CAM",
+                use_container_width=True
+            )
+
+
+        # Overlay
+        with col3:
+
+            st.image(
+                overlay,
+                caption="Overlay Grad-CAM",
+                use_container_width=True
+            )
+
+
+        # Nama feature layer
+        st.caption(
+            f"Feature layer yang digunakan: {layer_name}"
+        )
+
+
+        # Informasi Grad-CAM
+        st.info(
+            "Area berwarna merah atau kuning menunjukkan bagian "
+            "yang relatif memberikan kontribusi lebih besar terhadap "
+            "keputusan model. Area biru menunjukkan kontribusi yang "
+            "relatif lebih rendah. Grad-CAM bukan bukti bahwa area "
+            "tersebut merupakan ciri klinis Diabetes."
         )

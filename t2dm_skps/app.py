@@ -89,7 +89,7 @@ st.set_page_config(
 # CUSTOM CSS
 # =========================
 st.markdown(
-    """
+    
     <style>
 
     /* =========================
@@ -390,7 +390,7 @@ st.markdown(
     }
 
     </style>
-    """,
+    ,
     unsafe_allow_html=True
 )
 
@@ -400,7 +400,7 @@ st.markdown(
 # =========================
 
 st.markdown(
-    """
+
     <div class="custom-title">
         Deteksi T2DM dari Citra Lidah
     </div>
@@ -410,7 +410,7 @@ st.markdown(
         <b>Deteksi</b> untuk mendapatkan hasil
         klasifikasi Diabetes atau Non-Diabetes.
     </div>
-    """,
+   ,
     unsafe_allow_html=True
 )
 
@@ -513,13 +513,13 @@ if uploaded is not None:
         # =========================
 
         st.markdown(
-            """
+        
             <div class="result-card">
 
                 <div class="result-title">
                     HASIL DETEKSI
                 </div>
-            """,
+        ,
             unsafe_allow_html=True
         )
 
@@ -529,11 +529,11 @@ if uploaded is not None:
         # =========================
 
         st.markdown(
-            f"""
+            
                 <div class="result-label">
                     {CLASS_NAMES[label]}
                 </div>
-            """,
+          ,
             unsafe_allow_html=True
         )
 
@@ -543,7 +543,6 @@ if uploaded is not None:
         # =========================
 
         st.markdown(
-            f"""
                 <div class="result-confidence">
                     {confidence * 100:.2f}%
                 </div>
@@ -553,7 +552,7 @@ if uploaded is not None:
                 </div>
 
             </div>
-            """,
+            ,
             unsafe_allow_html=True
         )
 
@@ -582,10 +581,10 @@ if uploaded is not None:
 # =========================
 
 st.markdown(
-    """
+  
     <div class="footer">
         Klasifikasi T2DM Berdasarkan Citra Lidah
     </div>
-    """,
+   ,
     unsafe_allow_html=True
 )

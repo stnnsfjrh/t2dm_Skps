@@ -40,7 +40,7 @@ st.markdown(
     /* Memusatkan teks judul dan paragraf */
     h1, h2, h3, p, label, .stMarkdown {
         text-align: center !important;
-        color: #ffffff !important;
+        color: ffffff ;
     }
 
     /* Memusatkan gambar yang diunggah */

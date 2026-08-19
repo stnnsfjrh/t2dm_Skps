@@ -19,63 +19,14 @@ CLASS_NAMES = ["Non-Diabetes", "Diabetes"]
 
 
 # =========================
-# STREAMLIT CONFIG & CUSTOM CSS
-# =========================
-st.set_page_config(
-    page_title="Deteksi T2DM",
-    layout="centered"
-)
-
-# Background gradasi biru ke merah & perataan teks ke tengah
-st.markdown(
-  
-    <style>
-    /* Background aplikasi gradasi biru ke merah */
-    .stApp {
-        background: linear-gradient(135deg, 1e3c72 0%, 2a5298 35%, 9a1f40 70%, d31027 100%);
-        background-attachment: fixed;
-        color: ffffff;
-    }
-
-    /* Memusatkan teks judul dan paragraf */
-    h1, h2, h3, p, label, .stMarkdown {
-        text-align: center !important;
-        color: ffffff ;
-    }
-
-    /* Memusatkan gambar yang diunggah */
-    [data-testid="stImage"] {
-        display: flex;
-        justify-content: center;
-        margin: 0 auto;
-    }
-
-    /* Memusatkan file uploader widget */
-    [data-testid="stFileUploader"] {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-    }
-    
-    /* Penyesuaian metrik agar rata tengah */
-    [data-testid="stMetric"] {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        text-align: center;
-    }
-    </style>
-    ,
-    unsafe_allow_html=True
-)
-
-
-# =========================
 # LOAD MODEL
 # =========================
 @st.cache_resource
 def load_model():
-    return keras.models.load_model(MODEL_PATH, compile=False)
+    return keras.models.load_model(
+        MODEL_PATH,
+        compile=False
+    )
 
 
 # =========================
@@ -103,27 +54,370 @@ def preprocess(file_bytes):
 # PREDIKSI
 # =========================
 def predict(model, batch):
+
     prediction = model.predict(
         batch,
         verbose=0
     )
 
-    p = float(prediction.reshape(-1)[0])
-    label = int(p >= THRESHOLD)
-    confidence = p if label == 1 else 1 - p
+    p = float(
+        prediction.reshape(-1)[0]
+    )
+
+    label = int(
+        p >= THRESHOLD
+    )
+
+    confidence = (
+        p if label == 1
+        else 1 - p
+    )
 
     return p, label, confidence
 
 
 # =========================
+# STREAMLIT CONFIG
+# =========================
+st.set_page_config(
+    page_title="Deteksi T2DM",
+    layout="centered"
+)
+
+
+# =========================
+# CUSTOM CSS
+# =========================
+st.markdown(
+    """
+    <style>
+
+    /* =========================
+       BACKGROUND
+       ========================= */
+
+    .stApp {
+        background: linear-gradient(
+            135deg,
+            #1e3c72 0%,
+            #2a5298 35%,
+            #9a1f40 70%,
+            #d31027 100%
+        );
+
+        color: white;
+    }
+
+
+    /* =========================
+       MAIN CONTAINER
+       ========================= */
+
+    .main .block-container {
+        max-width: 760px;
+        padding-top: 45px;
+        padding-bottom: 50px;
+        padding-left: 30px;
+        padding-right: 30px;
+    }
+
+
+    /* =========================
+       TITLE
+       ========================= */
+
+    .custom-title {
+        text-align: center;
+        font-size: 38px;
+        font-weight: 700;
+        margin-bottom: 10px;
+
+        background: linear-gradient(
+            90deg,
+            #42a5f5,
+            #ef5350
+        );
+
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+
+
+    /* =========================
+       DESCRIPTION
+       ========================= */
+
+    .custom-description {
+        text-align: center;
+        color: #e4e8f0;
+        font-size: 15px;
+        line-height: 1.6;
+        margin-bottom: 30px;
+    }
+
+
+    /* =========================
+       WARNING
+       ========================= */
+
+    [data-testid="stAlert"] {
+        border-radius: 10px;
+    }
+
+
+    /* =========================
+       UPLOAD TITLE
+       ========================= */
+
+    .upload-title {
+        color: #ffffff;
+        font-size: 15px;
+        font-weight: 600;
+        margin-top: 25px;
+        margin-bottom: 10px;
+    }
+
+
+    /* =========================
+       FILE UPLOADER
+       ========================= */
+
+    [data-testid="stFileUploader"] {
+        background: rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 8px;
+    }
+
+
+    [data-testid="stFileUploaderDropzone"] {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 10px;
+    }
+
+
+    /* =========================
+       BUTTON
+       ========================= */
+
+    .stButton > button {
+        width: 100%;
+        height: 48px;
+
+        margin-top: 10px;
+
+        border-radius: 10px;
+        border: none;
+
+        background: linear-gradient(
+            90deg,
+            #1976d2,
+            #e53935
+        );
+
+        color: white;
+
+        font-size: 15px;
+        font-weight: 600;
+
+        transition: 0.2s;
+    }
+
+
+    .stButton > button:hover {
+        background: linear-gradient(
+            90deg,
+            #2196f3,
+            #f44336
+        );
+
+        color: white;
+    }
+
+
+    /* =========================
+       IMAGE
+       ========================= */
+
+    [data-testid="stImage"] {
+        border-radius: 12px;
+        overflow: hidden;
+    }
+
+
+    /* =========================
+       RESULT CARD
+       ========================= */
+
+    .result-card {
+        background: rgba(
+            8,
+            20,
+            45,
+            0.88
+        );
+
+        border: 1px solid rgba(
+            255,
+            255,
+            255,
+            0.15
+        );
+
+        border-radius: 15px;
+
+        padding: 28px;
+
+        margin-top: 20px;
+
+        text-align: center;
+    }
+
+
+    /* =========================
+       RESULT TITLE
+       ========================= */
+
+    .result-title {
+        color: #c5cfdf;
+        font-size: 14px;
+        margin-bottom: 8px;
+    }
+
+
+    /* =========================
+       RESULT LABEL
+       ========================= */
+
+    .result-label {
+        color: white;
+        font-size: 30px;
+        font-weight: 700;
+        margin-bottom: 5px;
+    }
+
+
+    /* =========================
+       CONFIDENCE
+       ========================= */
+
+    .result-confidence {
+        font-size: 42px;
+        font-weight: 700;
+
+        background: linear-gradient(
+            90deg,
+            #42a5f5,
+            #ef5350
+        );
+
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+
+
+    /* =========================
+       CONFIDENCE DESCRIPTION
+       ========================= */
+
+    .result-description {
+        color: #aebbd0;
+        font-size: 13px;
+        margin-top: 5px;
+    }
+
+
+    /* =========================
+       METRIC
+       ========================= */
+
+    [data-testid="stMetric"] {
+        background: rgba(
+            255,
+            255,
+            255,
+            0.07
+        );
+
+        border: 1px solid rgba(
+            255,
+            255,
+            255,
+            0.12
+        );
+
+        border-radius: 12px;
+
+        padding: 15px;
+    }
+
+
+    /* =========================
+       FOOTER
+       ========================= */
+
+    .footer {
+        text-align: center;
+
+        color: rgba(
+            255,
+            255,
+            255,
+            0.60
+        );
+
+        font-size: 12px;
+
+        margin-top: 45px;
+
+        padding-top: 20px;
+
+        border-top: 1px solid rgba(
+            255,
+            255,
+            255,
+            0.12
+        );
+    }
+
+
+    /* =========================
+       STREAMLIT HEADER
+       ========================= */
+
+    header {
+        background: transparent !important;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# =========================
 # HEADER
 # =========================
-st.title("Deteksi T2DM dari Citra Lidah")
 
-st.write(
-    "Unggah citra lidah kemudian tekan tombol "
-    "**Deteksi** untuk mendapatkan hasil prediksi."
+st.markdown(
+    """
+    <div class="custom-title">
+        Deteksi T2DM dari Citra Lidah
+    </div>
+
+    <div class="custom-description">
+        Unggah citra lidah kemudian tekan tombol
+        <b>Deteksi</b> untuk mendapatkan hasil
+        klasifikasi Diabetes atau Non-Diabetes.
+    </div>
+    """,
+    unsafe_allow_html=True
 )
+
+
+# =========================
+# WARNING
+# =========================
 
 st.warning(
     "Hasil prediksi model bukan diagnosis medis "
@@ -134,16 +428,34 @@ st.warning(
 # =========================
 # UPLOAD GAMBAR
 # =========================
+
+st.markdown(
+    """
+    <div class="upload-title">
+        Unggah Citra Lidah
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+
 uploaded = st.file_uploader(
     "Unggah citra lidah",
-    type=["jpg", "jpeg", "png"]
+    type=[
+        "jpg",
+        "jpeg",
+        "png"
+    ],
+    label_visibility="collapsed"
 )
 
 
 # =========================
 # TAMPILKAN GAMBAR
 # =========================
+
 if uploaded is not None:
+
     file_bytes = uploaded.getvalue()
 
     display_img = Image.open(
@@ -153,50 +465,127 @@ if uploaded is not None:
     st.image(
         display_img,
         caption="Citra yang diunggah",
-        width=300
+        width=400
     )
+
 
     # =========================
     # TOMBOL DETEKSI
     # =========================
+
     detect_button = st.button(
-        "🔍 Deteksi",
+        "Deteksi",
         type="primary",
         use_container_width=True
     )
 
+
     # =========================
     # PROSES DETEKSI
     # =========================
+
     if detect_button:
-        with st.spinner("Sedang melakukan deteksi..."):
+
+        with st.spinner(
+            "Sedang melakukan deteksi..."
+        ):
+
+            # Load model
             model = load_model()
-            img = preprocess(file_bytes)
+
+            # Preprocessing
+            img = preprocess(
+                file_bytes
+            )
+
+            # Tambahkan batch dimension
             batch = img[None, ...]
-            p, label, confidence = predict(model, batch)
 
-        # =========================
-        # HASIL
-        # =========================
-        st.divider()
-        st.subheader("Hasil Deteksi")
-
-        if label == 1:
-            st.error(
-                f"### Diabetes\n"
-                f"Confidence: **{confidence * 100:.2f}%**"
-            )
-        else:
-            st.success(
-                f"### Non-Diabetes\n"
-                f"Confidence: **{confidence * 100:.2f}%**"
+            # Prediksi
+            p, label, confidence = predict(
+                model,
+                batch
             )
 
+
         # =========================
-        # PERSENTASE
+        # HASIL DETEKSI
         # =========================
-        st.progress(int(confidence * 100))
+
+        st.markdown(
+            """
+            <div class="result-card">
+
+                <div class="result-title">
+                    HASIL DETEKSI
+                </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
+        # =========================
+        # LABEL
+        # =========================
+
+        st.markdown(
+            f"""
+                <div class="result-label">
+                    {CLASS_NAMES[label]}
+                </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
+        # =========================
+        # CONFIDENCE
+        # =========================
+
+        st.markdown(
+            f"""
+                <div class="result-confidence">
+                    {confidence * 100:.2f}%
+                </div>
+
+                <div class="result-description">
+                    Persentase keyakinan model terhadap hasil deteksi
+                </div>
+
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
+        # =========================
+        # PROGRESS
+        # =========================
+
+        st.progress(
+            int(confidence * 100)
+        )
+
+
+        # =========================
+        # METRIC
+        # =========================
+
         st.metric(
             "Persentase Keyakinan Deteksi",
             f"{confidence * 100:.2f}%"
         )
+
+
+# =========================
+# FOOTER
+# =========================
+
+st.markdown(
+    """
+    <div class="footer">
+        Klasifikasi T2DM Berdasarkan Citra Lidah
+    </div>
+    """,
+    unsafe_allow_html=True
+)

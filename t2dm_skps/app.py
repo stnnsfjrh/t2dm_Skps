@@ -311,11 +311,11 @@ st.markdown(
 # =========================
 # JUDUL
 # =========================
-st.markdown(
-        <h1>
-            "Deteksi T2DM dari Citra Lidah"
-        </h1>
-    unsafe_allow_html=True
+st.title("Deteksi T2DM dari Citra Lidah")
+
+st.write(
+    "Unggah citra lidah, kemudian tekan tombol **Deteksi** "
+    "untuk mendapatkan hasil klasifikasi Diabetes atau Non-Diabetes."
 )
 
 

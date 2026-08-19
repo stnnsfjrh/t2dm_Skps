@@ -393,28 +393,12 @@ if uploaded is not None:
         # =========================
         # HASIL
         # =========================
-        st.markdown(
-            f"""
-            <div class="result-card">
+       st.subheader("Hasil Deteksi")
 
-                <div class="result-title">
-                    HASIL DETEKSI
-                </div>
+        st.success(
+            f"Hasil Klasifikasi: {CLASS_NAMES[label]}"
+        )
 
-                <div class="result-label">
-                    {CLASS_NAMES[label]}
-                </div>
-
-                <div class="result-confidence">
-                    {confidence * 100:.2f}%
-                </div>
-
-                <div class="result-description">
-                    Tingkat keyakinan model
-                    terhadap hasil klasifikasi
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True
+        st.write(
+            f"**Tingkat Keyakinan Model: {confidence * 100:.2f}%**"
         )

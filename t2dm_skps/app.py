@@ -19,6 +19,58 @@ CLASS_NAMES = ["Non-Diabetes", "Diabetes"]
 
 
 # =========================
+# STREAMLIT CONFIG & CUSTOM CSS
+# =========================
+st.set_page_config(
+    page_title="Deteksi T2DM",
+    layout="centered"
+)
+
+# Background gradasi biru ke merah & perataan teks ke tengah
+st.markdown(
+  
+    <style>
+    /* Background aplikasi gradasi biru ke merah */
+    .stApp {
+        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 35%, #9a1f40 70%, #d31027 100%);
+        background-attachment: fixed;
+        color: #ffffff;
+    }
+
+    /* Memusatkan teks judul dan paragraf */
+    h1, h2, h3, p, label, .stMarkdown {
+        text-align: center !important;
+        color: #ffffff !important;
+    }
+
+    /* Memusatkan gambar yang diunggah */
+    [data-testid="stImage"] {
+        display: flex;
+        justify-content: center;
+        margin: 0 auto;
+    }
+
+    /* Memusatkan file uploader widget */
+    [data-testid="stFileUploader"] {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+    }
+    
+    /* Penyesuaian metrik agar rata tengah */
+    [data-testid="stMetric"] {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+    }
+    </style>
+    ,
+    unsafe_allow_html=True
+)
+
+
+# =========================
 # LOAD MODEL
 # =========================
 @st.cache_resource
@@ -51,38 +103,22 @@ def preprocess(file_bytes):
 # PREDIKSI
 # =========================
 def predict(model, batch):
-
     prediction = model.predict(
         batch,
         verbose=0
     )
 
     p = float(prediction.reshape(-1)[0])
-
     label = int(p >= THRESHOLD)
-
-    confidence = (
-        p if label == 1
-        else 1 - p
-    )
+    confidence = p if label == 1 else 1 - p
 
     return p, label, confidence
 
 
 # =========================
-# STREAMLIT CONFIG
-# =========================
-st.set_page_config(
-    page_title="Deteksi T2DM",
-    page_icon="🔬",
-    layout="centered"
-)
-
-
-# =========================
 # HEADER
 # =========================
-st.title("🔬 Deteksi T2DM dari Citra Lidah")
+st.title("Deteksi T2DM dari Citra Lidah")
 
 st.write(
     "Unggah citra lidah kemudian tekan tombol "
@@ -108,7 +144,6 @@ uploaded = st.file_uploader(
 # TAMPILKAN GAMBAR
 # =========================
 if uploaded is not None:
-
     file_bytes = uploaded.getvalue()
 
     display_img = Image.open(
@@ -118,9 +153,8 @@ if uploaded is not None:
     st.image(
         display_img,
         caption="Citra yang diunggah",
-        width=400
+        width=300
     )
-
 
     # =========================
     # TOMBOL DETEKSI
@@ -131,59 +165,37 @@ if uploaded is not None:
         use_container_width=True
     )
 
-
     # =========================
     # PROSES DETEKSI
     # =========================
     if detect_button:
-
         with st.spinner("Sedang melakukan deteksi..."):
-
-            # Load model
             model = load_model()
-
-            # Preprocessing
             img = preprocess(file_bytes)
-
-            # Tambahkan batch dimension
             batch = img[None, ...]
-
-            # Prediksi
-            p, label, confidence = predict(
-                model,
-                batch
-            )
-
+            p, label, confidence = predict(model, batch)
 
         # =========================
         # HASIL
         # =========================
         st.divider()
-
         st.subheader("Hasil Deteksi")
 
         if label == 1:
-
             st.error(
                 f"### Diabetes\n"
                 f"Confidence: **{confidence * 100:.2f}%**"
             )
-
         else:
-
             st.success(
                 f"### Non-Diabetes\n"
                 f"Confidence: **{confidence * 100:.2f}%**"
             )
 
-
         # =========================
         # PERSENTASE
         # =========================
-        st.progress(
-            int(confidence * 100)
-        )
-
+        st.progress(int(confidence * 100))
         st.metric(
             "Persentase Keyakinan Deteksi",
             f"{confidence * 100:.2f}%"

@@ -1,5 +1,4 @@
 tensorflow==2.18.0
-keras==3.12.2
 streamlit>=1.40,<2.0
 numpy>=1.26,<2.1
 matplotlib>=3.8

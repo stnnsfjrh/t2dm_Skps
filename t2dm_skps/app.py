@@ -46,7 +46,7 @@ def load_efficientnet():
 
 
 # =========================
-# LOAD MODEL MOBILENETV2 (NATIVE + WEIGHTS)
+# LOAD MODEL MOBILENETV2
 # =========================
 @st.cache_resource
 def load_mobilenet():
@@ -54,7 +54,7 @@ def load_mobilenet():
         st.error(f"File model tidak ditemukan: {MOBILENET_PATH.name}")
         return None
 
-    # 1. Coba load langsung
+    # Cara 1: Load langsung
     try:
         return keras.models.load_model(
             MOBILENET_PATH,
@@ -64,7 +64,7 @@ def load_mobilenet():
     except Exception:
         pass
 
-    # 2. Rekonstruksi arsitektur dan inject weights
+    # Cara 2: Rekonstruksi model native dan inject weights .keras
     try:
         inputs = keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3))
         
@@ -79,7 +79,9 @@ def load_mobilenet():
         outputs = keras.layers.Dense(1, activation="sigmoid", name="classifier")(x)
         
         model = keras.Model(inputs=inputs, outputs=outputs, name="mobilenetv2_model")
-        model.load_weights(str(MOBILENET_PATH), skip_mismatch=True, by_name=True)
+        
+        # Load weights format .keras native
+        model.load_weights(str(MOBILENET_PATH))
         return model
 
     except Exception as e:

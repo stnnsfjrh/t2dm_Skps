@@ -194,7 +194,7 @@ def get_target_conv_layer(model):
 # =========================
 # GRAD-CAM
 # =========================
-def compute_gradcam(model, image):
+def gradcam(model, image):
     batch = image[None, ...]
 
     # 1. Cari sub-model backbone (Base Model) jika model berupa pipeline bertingkat

@@ -251,6 +251,23 @@ st.set_page_config(
 st.markdown(
     """
     <style>
+    /* Mengizinkan konten menyusut dan melebar mengikuti viewport/zoom */
+    .stMainBlockContainer, .block-container {
+        max-width: 95% !important;
+        width: 100% !important;
+        padding-left: 2rem !important;
+        padding-right: 2rem !important;
+        padding-top: 2rem !important;
+    }
+
+    /* Pastikan gambar dan elemen di dalam kolom ikut mengecil proporsional */
+    [data-testid="stImage"] img {
+        width: 100% !important;
+        height: auto !important;
+        object-fit: contain;
+    }
+
+    /* Background & style default */
     .stApp {
         background:
             radial-gradient(
@@ -298,7 +315,7 @@ st.markdown(
     }
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 

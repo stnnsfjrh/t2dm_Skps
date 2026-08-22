@@ -7,11 +7,6 @@ import tensorflow as tf
 from PIL import Image
 from tensorflow import keras
 
-try:
-    import tf_keras as legacy_keras
-except ImportError:
-    legacy_keras = None
-
 
 # =========================
 # KONFIGURASI
@@ -29,20 +24,12 @@ CLASS_NAMES = [
 
 
 # =========================
-# LOAD MODEL DENGAN FALLBACK
+# LOAD MODEL EFFICIENTNET-B0
 # =========================
 @st.cache_resource
 def load_efficientnet():
     if not EFFICIENTNET_PATH.exists():
         st.error(f"File model tidak ditemukan: {EFFICIENTNET_PATH.name}")
-        return None
-
-    # Deteksi pointer teks Git LFS yang korup
-    if EFFICIENTNET_PATH.stat().st_size < 2000:
-        st.error(
-            f"File `{EFFICIENTNET_PATH.name}` berukuran terlalu kecil ({EFFICIENTNET_PATH.stat().st_size} bytes). "
-            "File tersebut hanya pointer teks Git LFS. Silakan unggah file binary asli ke GitHub."
-        )
         return None
 
     try:
@@ -52,41 +39,22 @@ def load_efficientnet():
             safe_mode=False
         )
     except Exception:
-        if legacy_keras is not None:
-            return legacy_keras.models.load_model(
-                str(EFFICIENTNET_PATH),
-                compile=False
-            )
         return tf.keras.models.load_model(
             str(EFFICIENTNET_PATH),
             compile=False
         )
 
 
+# =========================
+# LOAD MODEL MOBILENETV2 (NATIVE + WEIGHTS)
+# =========================
 @st.cache_resource
 def load_mobilenet():
     if not MOBILENET_PATH.exists():
         st.error(f"File model tidak ditemukan: {MOBILENET_PATH.name}")
         return None
 
-    # Deteksi pointer teks Git LFS yang korup
-    if MOBILENET_PATH.stat().st_size < 2000:
-        st.error(
-            f"File `{MOBILENET_PATH.name}` berukuran terlalu kecil ({MOBILENET_PATH.stat().st_size} bytes). "
-            "File tersebut hanya pointer teks Git LFS. Silakan unggah file binary asli ke GitHub."
-        )
-        return None
-
-    # Coba loader legacy Keras terlebih dahulu
-    if legacy_keras is not None:
-        try:
-            return legacy_keras.models.load_model(
-                str(MOBILENET_PATH),
-                compile=False
-            )
-        except Exception:
-            pass
-
+    # 1. Coba load langsung
     try:
         return keras.models.load_model(
             MOBILENET_PATH,
@@ -94,10 +62,29 @@ def load_mobilenet():
             safe_mode=False
         )
     except Exception:
-        return tf.keras.models.load_model(
-            str(MOBILENET_PATH),
-            compile=False
+        pass
+
+    # 2. Rekonstruksi arsitektur dan inject weights
+    try:
+        inputs = keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3))
+        
+        base_model = keras.applications.MobileNetV2(
+            input_tensor=inputs,
+            include_top=False,
+            weights=None
         )
+        
+        x = keras.layers.GlobalAveragePooling2D(name="gap_mobilenetv2")(base_model.output)
+        x = keras.layers.Dropout(0.2, name="dropout_mobilenetv2")(x)
+        outputs = keras.layers.Dense(1, activation="sigmoid", name="classifier")(x)
+        
+        model = keras.Model(inputs=inputs, outputs=outputs, name="mobilenetv2_model")
+        model.load_weights(str(MOBILENET_PATH), skip_mismatch=True, by_name=True)
+        return model
+
+    except Exception as e:
+        st.error(f"Gagal memuat MobileNetV2: {str(e)}")
+        return None
 
 
 # =========================
@@ -337,7 +324,7 @@ st.markdown(
 # =========================
 st.title("Deteksi T2DM dari Citra Lidah")
 st.write(
-    "Unggah citra lidah untuk melakukan analisis komparasi "
+    "Unggah citra lidah untuk melakukan inferensi perbandingan "
     "menggunakan model **EfficientNet-B0** dan **MobileNetV2**."
 )
 
@@ -390,7 +377,7 @@ if uploaded is not None:
 
         with st.spinner("Memuat model dan melakukan inferensi..."):
 
-            # 1. Load model secara terpisah
+            # 1. Load model
             eff_model = load_efficientnet()
             mob_model = load_mobilenet()
 

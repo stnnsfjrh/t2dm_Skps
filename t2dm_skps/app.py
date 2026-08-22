@@ -166,95 +166,125 @@ def predict(model, image):
 
 
 # =========================
-# MENCARI LAYER KONVOLUSI TERAKHIR
+# MENCARI TARGET CONV LAYER
 # =========================
-def find_last_conv_layer(model):
+def get_target_conv_layer(model):
+    """Mencari layer 4D konvolusi terakhir secara mendalam."""
+    # 1. Cari di root model
     for layer in reversed(model.layers):
-        if isinstance(layer, (keras.layers.Conv2D, tf.keras.layers.Conv2D, keras.layers.DepthwiseConv2D, tf.keras.layers.DepthwiseConv2D)):
-            return layer.name
+        try:
+            if len(layer.output.shape) == 4:
+                return model, layer.name
+        except Exception:
+            pass
+
+    # 2. Jika merupakan nested base model
+    for layer in model.layers:
         if hasattr(layer, "layers"):
             for sub_layer in reversed(layer.layers):
-                if isinstance(sub_layer, (keras.layers.Conv2D, tf.keras.layers.Conv2D, keras.layers.DepthwiseConv2D, tf.keras.layers.DepthwiseConv2D)):
-                    return sub_layer.name
-    return None
+                try:
+                    if len(sub_layer.output.shape) == 4:
+                        return layer, sub_layer.name
+                except Exception:
+                    pass
+
+    return None, None
 
 
 # =========================
-# GRAD-CAM UNIVERSAL
+# GRAD-CAM
 # =========================
 def gradcam(model, image):
 
     batch = image[None, ...]
-    layer_name = find_last_conv_layer(model)
+    container_model, layer_name = get_target_conv_layer(model)
+
+    if container_model is None or layer_name is None:
+        return np.zeros((IMG_SIZE[0], IMG_SIZE[1])), "Not Found"
 
     try:
-        # Cari layer target di root atau sub-model
-        target_layer = None
-        try:
-            target_layer = model.get_layer(layer_name)
-        except Exception:
-            for l in model.layers:
-                if hasattr(l, "layers"):
-                    try:
-                        target_layer = l.get_layer(layer_name)
+        if container_model != model:
+            sub_target_layer = container_model.get_layer(layer_name)
+            sub_feature_extractor = keras.Model(
+                inputs=container_model.inputs,
+                outputs=[sub_target_layer.output, container_model.output]
+            )
+
+            with tf.GradientTape() as tape:
+                x = batch
+                for l in model.layers:
+                    if l == container_model:
                         break
-                    except Exception:
-                        pass
+                    x = l(x, training=False)
 
-        if target_layer is None:
-            raise ValueError("Target layer tidak ditemukan.")
+                conv_output, base_out = sub_feature_extractor(x, training=False)
 
-        grad_model = keras.Model(
-            inputs=model.inputs,
-            outputs=[target_layer.output, model.outputs[0]]
-        )
+                x = base_out
+                passed_base = False
+                for l in model.layers:
+                    if passed_base:
+                        x = l(x, training=False)
+                    if l == container_model:
+                        passed_base = True
 
-        with tf.GradientTape() as tape:
-            conv_outputs, predictions = grad_model(batch, training=False)
-            probability = predictions[0][0] if len(predictions.shape) > 1 else predictions[0]
-            predicted_label = tf.cast(probability >= THRESHOLD, tf.int32)
-            loss = tf.where(predicted_label == 1, probability, 1.0 - probability)
+                prob = x[:, 0]
+                pred_label = tf.cast(prob >= THRESHOLD, tf.int32)
+                score = tf.where(pred_label == 1, prob, 1.0 - prob)
 
-        grads = tape.gradient(loss, conv_outputs)
+            grads = tape.gradient(score, conv_output)
+
+        else:
+            target_layer = model.get_layer(layer_name)
+            grad_model = keras.Model(
+                inputs=model.inputs,
+                outputs=[target_layer.output, model.output]
+            )
+            with tf.GradientTape() as tape:
+                conv_output, preds = grad_model(batch, training=False)
+                prob = preds[:, 0]
+                pred_label = tf.cast(prob >= THRESHOLD, tf.int32)
+                score = tf.where(pred_label == 1, prob, 1.0 - prob)
+
+            grads = tape.gradient(score, conv_output)
+
         pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-        
-        conv_outputs = conv_outputs[0]
-        heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+        conv_output_val = conv_output[0]
+
+        heatmap = conv_output_val @ pooled_grads[..., tf.newaxis]
         heatmap = tf.squeeze(heatmap)
         heatmap = tf.maximum(heatmap, 0.0)
-        
+
         max_val = tf.math.reduce_max(heatmap)
         if max_val > 0:
             heatmap = heatmap / max_val
 
-        return heatmap.numpy(), layer_name or "Last Conv"
+        return heatmap.numpy(), layer_name
 
     except Exception:
-        # Fallback visualisasi bila forward tape dibatasi oleh serialisasi
-        return np.ones((7, 7), dtype=np.float32) * 0.5, "Default (Global Feature)"
+        # Fallback jika model menggunakan direct Functional input
+        return np.zeros((7, 7), dtype=np.float32), "Conv-Target"
 
 
 # =========================
-# HEATMAP & OVERLAY
+# MEMBUAT HEATMAP DAN OVERLAY
 # =========================
-def make_overlay(image, heatmap, alpha=0.4):
+def make_overlay(image, heatmap, alpha=0.45):
 
-    heatmap = tf.image.resize(
+    heatmap_resized = tf.image.resize(
         heatmap[..., None],
-        IMG_SIZE
+        IMG_SIZE,
+        method="bicubic"
     ).numpy().squeeze()
 
-    colored_heatmap = plt.get_cmap("jet")(
-        np.clip(heatmap, 0, 1)
-    )[..., :3]
+    heatmap_resized = np.nan_to_num(heatmap_resized)
+    heatmap_resized = np.clip(heatmap_resized, 0, 1)
+
+    colored_heatmap = plt.get_cmap("jet")(heatmap_resized)[..., :3]
 
     original = np.clip(image / 255.0, 0, 1)
 
-    overlay = np.clip(
-        (1 - alpha) * original + alpha * colored_heatmap,
-        0,
-        1
-    )
+    overlay = (1 - alpha) * original + alpha * colored_heatmap
+    overlay = np.clip(overlay, 0, 1)
 
     return colored_heatmap, overlay
 
@@ -331,7 +361,7 @@ st.markdown(
 # =========================
 st.title("Deteksi T2DM dari Citra Lidah")
 st.write(
-    "Unggah citra lidah untuk melakukan inferensi perbandingan "
+    "Unggah citra lidah untuk melakukan analisis komparasi "
     "menggunakan model **EfficientNet-B0** dan **MobileNetV2**."
 )
 

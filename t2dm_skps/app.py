@@ -24,19 +24,44 @@ CLASS_NAMES = [
 
 
 # =========================
-# LOAD MODEL
+# LOAD MODEL DENGAN FALLBACK
 # =========================
 @st.cache_resource
-def load_all_models():
-    eff_model = keras.models.load_model(
-        EFFICIENTNET_PATH,
-        compile=False
-    )
-    mob_model = keras.models.load_model(
-        MOBILENET_PATH,
-        compile=False
-    )
-    return eff_model, mob_model
+def load_efficientnet():
+    if not EFFICIENTNET_PATH.exists():
+        st.error(f"File model tidak ditemukan: {EFFICIENTNET_PATH.name}")
+        return None
+
+    try:
+        return keras.models.load_model(
+            EFFICIENTNET_PATH,
+            compile=False,
+            safe_mode=False
+        )
+    except Exception:
+        return tf.keras.models.load_model(
+            str(EFFICIENTNET_PATH),
+            compile=False
+        )
+
+
+@st.cache_resource
+def load_mobilenet():
+    if not MOBILENET_PATH.exists():
+        st.error(f"File model tidak ditemukan: {MOBILENET_PATH.name}")
+        return None
+
+    try:
+        return keras.models.load_model(
+            MOBILENET_PATH,
+            compile=False,
+            safe_mode=False
+        )
+    except Exception:
+        return tf.keras.models.load_model(
+            str(MOBILENET_PATH),
+            compile=False
+        )
 
 
 # =========================
@@ -116,20 +141,18 @@ def last_feature_layer(base_model):
 
 # =========================
 # GRAD-CAM GENERIK
-# (Bekerja untuk Sub-model maupun Sequential/Functional)
 # =========================
 def gradcam(model, image):
 
     batch = image[None, ...]
 
-    # Cek apakah model memiliki sub-model (base model) atau merupakan single graph
+    # Cek apakah model membungkus sub-model (transfer learning base model)
     base_model = None
     for layer in model.layers:
-        if isinstance(layer, keras.Model):
+        if isinstance(layer, keras.Model) or isinstance(layer, tf.keras.Model):
             base_model = layer
             break
 
-    # 1. Kasus jika arsitektur menggunakan Base Model bertingkat
     if base_model is not None:
         target_layer = last_feature_layer(base_model)
         feature_model = keras.Model(
@@ -138,7 +161,6 @@ def gradcam(model, image):
         )
 
         with tf.GradientTape() as tape:
-            # Lewati layer sebelum base_model jika ada
             x = batch
             for layer in model.layers:
                 if layer == base_model:
@@ -147,7 +169,6 @@ def gradcam(model, image):
 
             conv_output, features = feature_model(x, training=False)
 
-            # Lewati layer setelah base_model
             x = features
             found_base = False
             for layer in model.layers:
@@ -162,7 +183,6 @@ def gradcam(model, image):
 
         gradients = tape.gradient(score, conv_output)
 
-    # 2. Kasus jika arsitektur satu grafik datar (Flat Model)
     else:
         target_layer = last_feature_layer(model)
         grad_model = keras.Model(
@@ -291,7 +311,7 @@ st.markdown(
 # =========================
 st.title("Deteksi T2DM dari Citra Lidah")
 st.write(
-    "Unggah citra lidah untuk melakukan inferensi perbandingan "
+    "Unggah citra lidah untuk melakukan analisis komparasi "
     "menggunakan model **EfficientNet-B0** dan **MobileNetV2**."
 )
 
@@ -329,7 +349,7 @@ if uploaded is not None:
         st.write("### Siap untuk Evaluasi")
         st.write(
             "Citra akan diproses secara paralel ke dalam model "
-            "EfficientNet-B0 dan MobileNetV2 beserta kalkulasi Grad-CAM masing-masing."
+            "**EfficientNet-B0** dan **MobileNetV2** beserta visualisasi Grad-CAM masing-masing."
         )
         detect_button = st.button(
             "Jalankan Deteksi Komparasi",
@@ -342,21 +362,24 @@ if uploaded is not None:
     # =========================
     if detect_button:
 
-        with st.spinner("Memproses inferensi pada EfficientNet-B0 dan MobileNetV2..."):
+        with st.spinner("Memuat model dan melakukan inferensi..."):
 
-            # 1. Load kedua model
+            # 1. Load model secara terpisah
             eff_model = load_efficientnet()
             mob_model = load_mobilenet()
 
-            # 2. Preprocessing gambar
+            if eff_model is None or mob_model is None:
+                st.stop()
+
+            # 2. Preprocessing
             image = preprocess(file_bytes)
 
-            # 3. Prediksi EfficientNet-B0
+            # 3. Prediksi & Grad-CAM EfficientNet-B0
             eff_label, eff_conf, _ = predict(eff_model, image)
             eff_heatmap, eff_layer = gradcam(eff_model, image)
             eff_colored, eff_overlay = make_overlay(image.numpy(), eff_heatmap)
 
-            # 4. Prediksi MobileNetV2
+            # 4. Prediksi & Grad-CAM MobileNetV2
             mob_label, mob_conf, _ = predict(mob_model, image)
             mob_heatmap, mob_layer = gradcam(mob_model, image)
             mob_colored, mob_overlay = make_overlay(image.numpy(), mob_heatmap)
@@ -364,7 +387,7 @@ if uploaded is not None:
         st.markdown("---")
 
         # ==========================================
-        # KOMPARASI 2 KOLOM (EFFICIENTNET vs MOBILENET)
+        # KOMPARASI 2 KOLOM
         # ==========================================
         col_eff, col_mob = st.columns(2)
 
@@ -445,15 +468,15 @@ if uploaded is not None:
         # ==========================================
         # RINGKASAN PERBANDINGAN
         # ==========================================
-        st.subheader("Ringkasan Komparasi Model")
+        st.subheader("Ringkasan Konsensus Model")
         
         is_consensus = (eff_label == mob_label)
         if is_consensus:
             st.info(
-                f"**Konsensus Model:** Kedua model sepakat memprediksi citra ini sebagai **{CLASS_NAMES[eff_label]}**."
+                f"**Konsensus:** Kedua arsitektur sepakat mengklasifikasikan citra sebagai **{CLASS_NAMES[eff_label]}**."
             )
         else:
             st.warning(
-                f"**Perbedaan Prediksi:** EfficientNet-B0 memprediksi **{CLASS_NAMES[eff_label]}** ({eff_conf*100:.1f}%), "
-                f"sedangkan MobileNetV2 memprediksi **{CLASS_NAMES[mob_label]}** ({mob_conf*100:.1f}%)."
+                f"**Perbedaan Prediksi:** EfficientNet-B0 mendeteksi **{CLASS_NAMES[eff_label]}** ({eff_conf*100:.1f}%), "
+                f"sedangkan MobileNetV2 mendeteksi **{CLASS_NAMES[mob_label]}** ({mob_conf*100:.1f}%)."
             )

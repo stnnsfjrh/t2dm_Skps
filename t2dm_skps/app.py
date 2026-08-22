@@ -73,13 +73,13 @@ def load_mobilenet():
             include_top=False,
             weights=None
         )
-        
+
         inputs = keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3))
         x = base_model(inputs, training=False)
         x = keras.layers.GlobalAveragePooling2D()(x)
         x = keras.layers.Dropout(0.2)(x)
         outputs = keras.layers.Dense(1, activation="sigmoid", name="classifier")(x)
-        
+
         model = keras.Model(inputs=inputs, outputs=outputs)
 
         if zipfile.is_zipfile(MOBILENET_PATH):
@@ -89,7 +89,7 @@ def load_mobilenet():
                     with tempfile.NamedTemporaryFile(suffix='.h5', delete=False) as tmp_file:
                         tmp_file.write(zip_ref.read(weight_files[0]))
                         tmp_path = tmp_file.name
-                    
+
                     base_model.load_weights(tmp_path, by_name=True, skip_mismatch=True)
                     model.load_weights(tmp_path, by_name=True, skip_mismatch=True)
                     return model
@@ -97,7 +97,7 @@ def load_mobilenet():
     except Exception:
         pass
 
-    # 3. Fallback
+    # 3. Fallback jika deserialisasi gagal
     base_model = keras.applications.MobileNetV2(
         input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3),
         include_top=False,
@@ -114,7 +114,6 @@ def load_mobilenet():
 # PREPROCESSING GAMBAR
 # =========================
 def preprocess(file_bytes):
-
     img = tf.io.decode_image(
         file_bytes,
         channels=3,
@@ -141,7 +140,6 @@ def preprocess(file_bytes):
 # PREDIKSI
 # =========================
 def predict(model, image):
-
     batch = image[None, ...]
 
     prediction = model.predict(
@@ -166,29 +164,16 @@ def predict(model, image):
 
 
 # =========================
-# MENCARI TARGET CONV LAYER
+# MENCARI LAYER 4D TERAKHIR
 # =========================
-def get_target_conv_layer(model):
-    """Mencari layer 4D konvolusi terakhir secara mendalam."""
-    # 1. Cari di root model
-    for layer in reversed(model.layers):
+def last_feature_layer(base_model):
+    for layer in reversed(base_model.layers):
         try:
             if len(layer.output.shape) == 4:
-                return model, layer.name
+                return layer
         except Exception:
             pass
-
-    # 2. Jika merupakan nested base model
-    for layer in model.layers:
-        if hasattr(layer, "layers"):
-            for sub_layer in reversed(layer.layers):
-                try:
-                    if len(sub_layer.output.shape) == 4:
-                        return layer, sub_layer.name
-                except Exception:
-                    pass
-
-    return None, None
+    raise ValueError("Layer feature map 4D tidak ditemukan.")
 
 
 # =========================
@@ -253,11 +238,11 @@ def gradcam(model, image):
 
     # Hitung bobot rata-rata Grad-CAM
     weights = tf.reduce_mean(gradients, axis=(1, 2))
-    
+
     # Linear combination
     heatmap = tf.reduce_sum(conv_output * weights[:, None, None, :], axis=-1)
     heatmap = tf.nn.relu(heatmap)
-    
+
     # Normalisasi 0 - 1
     max_val = tf.reduce_max(heatmap, axis=(1, 2), keepdims=True)
     heatmap = heatmap / (max_val + tf.keras.backend.epsilon())
@@ -269,22 +254,17 @@ def gradcam(model, image):
 # MEMBUAT HEATMAP DAN OVERLAY
 # =========================
 def make_overlay(image, heatmap, alpha=0.4):
-    # Resize heatmap sesuai ukuran gambar
     heatmap_resized = tf.image.resize(
         heatmap[..., None],
         IMG_SIZE,
         method="bilinear"
     ).numpy().squeeze()
 
-    # Memberikan warna colormap JET (Merah = Tinggi, Biru = Rendah)
     colored_heatmap = plt.get_cmap("jet")(
         np.clip(heatmap_resized, 0, 1)
     )[..., :3]
 
-    # Normalisasi gambar asli
     original = np.clip(image / 255.0, 0, 1)
-
-    # Gabungkan gambar asli + heatmap
     overlay = np.clip((1 - alpha) * original + alpha * colored_heatmap, 0, 1)
 
     return colored_heatmap, overlay
@@ -520,7 +500,7 @@ if uploaded is not None:
         # RINGKASAN KONSENSUS
         # ==========================================
         st.subheader("Ringkasan Konsensus Model")
-        
+
         is_consensus = (eff_label == mob_label)
         if is_consensus:
             st.info(

@@ -268,23 +268,24 @@ def gradcam(model, image):
 # =========================
 # MEMBUAT HEATMAP DAN OVERLAY
 # =========================
-def make_overlay(image, heatmap, alpha=0.45):
-
+def make_overlay(image, heatmap, alpha=0.4):
+    # Resize heatmap sesuai ukuran gambar
     heatmap_resized = tf.image.resize(
         heatmap[..., None],
         IMG_SIZE,
-        method="bicubic"
+        method="bilinear"
     ).numpy().squeeze()
 
-    heatmap_resized = np.nan_to_num(heatmap_resized)
-    heatmap_resized = np.clip(heatmap_resized, 0, 1)
+    # Memberikan warna colormap JET (Merah = Tinggi, Biru = Rendah)
+    colored_heatmap = plt.get_cmap("jet")(
+        np.clip(heatmap_resized, 0, 1)
+    )[..., :3]
 
-    colored_heatmap = plt.get_cmap("jet")(heatmap_resized)[..., :3]
-
+    # Normalisasi gambar asli
     original = np.clip(image / 255.0, 0, 1)
 
-    overlay = (1 - alpha) * original + alpha * colored_heatmap
-    overlay = np.clip(overlay, 0, 1)
+    # Gabungkan gambar asli + heatmap
+    overlay = np.clip((1 - alpha) * original + alpha * colored_heatmap, 0, 1)
 
     return colored_heatmap, overlay
 

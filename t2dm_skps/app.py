@@ -24,15 +24,41 @@ CLASS_NAMES = [
 
 
 # =========================
-# LOAD MODEL DENGAN CUSTOM OBJECTS
+# LOAD MODEL
 # =========================
+@st.cache_resource
+def load_efficientnet():
+    if not EFFICIENTNET_PATH.exists():
+        st.error(f"File model tidak ditemukan: {EFFICIENTNET_PATH.name}")
+        return None
+
+    custom_objects = {
+        "relu6": tf.nn.relu6,
+        "DepthwiseConv2D": keras.layers.DepthwiseConv2D,
+    }
+
+    try:
+        return keras.models.load_model(
+            EFFICIENTNET_PATH,
+            custom_objects=custom_objects,
+            compile=False,
+            safe_mode=False
+        )
+    except Exception:
+        return tf.keras.models.load_model(
+            str(EFFICIENTNET_PATH),
+            custom_objects=custom_objects,
+            compile=False,
+            safe_mode=False
+        )
+
+
 @st.cache_resource
 def load_mobilenet():
     if not MOBILENET_PATH.exists():
         st.error(f"File model tidak ditemukan: {MOBILENET_PATH.name}")
         return None
 
-    # Daftar custom objects yang sering memicu error serialisasi
     custom_objects = {
         "relu6": tf.nn.relu6,
         "DepthwiseConv2D": keras.layers.DepthwiseConv2D,
@@ -45,17 +71,14 @@ def load_mobilenet():
             compile=False,
             safe_mode=False
         )
-    except Exception as e1:
-        try:
-            return tf.keras.models.load_model(
-                str(MOBILENET_PATH),
-                custom_objects=custom_objects,
-                compile=False,
-                safe_mode=False
-            )
-        except Exception as e2:
-            st.error(f"Gagal memuat MobileNetV2. Detail error: {e2}")
-            return None
+    except Exception:
+        return tf.keras.models.load_model(
+            str(MOBILENET_PATH),
+            custom_objects=custom_objects,
+            compile=False,
+            safe_mode=False
+        )
+
 
 # =========================
 # PREPROCESSING GAMBAR
@@ -113,33 +136,27 @@ def predict(model, image):
 
 
 # =========================
-# MENCARI FEATURE LAYER
-# TERAKHIR UNTUK GRAD-CAM
+# MENCARI FEATURE LAYER GRAD-CAM
 # =========================
 def last_feature_layer(base_model):
 
     for layer in reversed(base_model.layers):
-
         try:
             if len(layer.output.shape) == 4:
                 return layer
-
         except Exception:
             pass
 
-    raise ValueError(
-        "Layer feature map 4D tidak ditemukan."
-    )
+    raise ValueError("Layer feature map 4D tidak ditemukan.")
 
 
 # =========================
-# GRAD-CAM GENERIK
+# GRAD-CAM
 # =========================
 def gradcam(model, image):
 
     batch = image[None, ...]
 
-    # Cek apakah model membungkus sub-model (transfer learning base model)
     base_model = None
     for layer in model.layers:
         if isinstance(layer, keras.Model) or isinstance(layer, tf.keras.Model):
@@ -204,13 +221,9 @@ def gradcam(model, image):
 
 
 # =========================
-# MEMBUAT HEATMAP DAN OVERLAY
+# HEATMAP & OVERLAY
 # =========================
-def make_overlay(
-    image,
-    heatmap,
-    alpha=0.4
-):
+def make_overlay(image, heatmap, alpha=0.4):
 
     heatmap = tf.image.resize(
         heatmap[..., None],
@@ -304,7 +317,7 @@ st.markdown(
 # =========================
 st.title("Deteksi T2DM dari Citra Lidah")
 st.write(
-    "Unggah citra lidah untuk melakukan analisis komparasi "
+    "Unggah citra lidah untuk melakukan inferensi perbandingan "
     "menggunakan model **EfficientNet-B0** dan **MobileNetV2**."
 )
 
@@ -357,11 +370,12 @@ if uploaded is not None:
 
         with st.spinner("Memuat model dan melakukan inferensi..."):
 
-            # 1. Load model secara terpisah
+            # 1. Memuat model
             eff_model = load_efficientnet()
             mob_model = load_mobilenet()
 
             if eff_model is None or mob_model is None:
+                st.error("Salah satu atau kedua model gagal dimuat. Periksa keberadaan file .keras di direktori.")
                 st.stop()
 
             # 2. Preprocessing

@@ -1,5 +1,3 @@
-import tempfile
-import zipfile
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -26,278 +24,144 @@ CLASS_NAMES = [
 
 
 # =========================
-# LOAD MODEL EFFICIENTNET-B0
+# LOAD MODEL
 # =========================
 @st.cache_resource
-def load_efficientnet():
-    if not EFFICIENTNET_PATH.exists():
-        st.error(f"File model tidak ditemukan: {EFFICIENTNET_PATH.name}")
-        return None
-
-    try:
-        return keras.models.load_model(
-            EFFICIENTNET_PATH,
-            compile=False,
-            safe_mode=False
-        )
-    except Exception:
-        return tf.keras.models.load_model(
-            str(EFFICIENTNET_PATH),
-            compile=False
-        )
-
-
-# =========================
-# LOAD MODEL MOBILENETV2
-# =========================
-@st.cache_resource
-def load_mobilenet():
-    if not MOBILENET_PATH.exists():
-        st.error(f"File model tidak ditemukan: {MOBILENET_PATH.name}")
-        return None
-
-    try:
-        return keras.models.load_model(
-            MOBILENET_PATH,
-            compile=False,
-            safe_mode=False
-        )
-    except Exception:
-        pass
-
-    try:
-        base_model = keras.applications.MobileNetV2(
-            input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3),
-            include_top=False,
-            weights=None
-        )
-
-        inputs = keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3))
-        x = base_model(inputs, training=False)
-        x = keras.layers.GlobalAveragePooling2D(name="gap_mobilenetv2")(x)
-        x = keras.layers.Dropout(0.2, name="dropout_mobilenetv2")(x)
-        outputs = keras.layers.Dense(1, activation="sigmoid", name="classifier")(x)
-
-        model = keras.Model(inputs=inputs, outputs=outputs)
-
-        if zipfile.is_zipfile(MOBILENET_PATH):
-            with zipfile.ZipFile(MOBILENET_PATH, 'r') as zip_ref:
-                weight_files = [f for f in zip_ref.namelist() if 'model.weights.h5' in f or 'weights' in f]
-                if weight_files:
-                    with tempfile.NamedTemporaryFile(suffix='.h5', delete=False) as tmp_file:
-                        tmp_file.write(zip_ref.read(weight_files[0]))
-                        tmp_path = tmp_file.name
-
-                    base_model.load_weights(tmp_path, by_name=True, skip_mismatch=True)
-                    model.load_weights(tmp_path, by_name=True, skip_mismatch=True)
-                    return model
-
-    except Exception:
-        pass
-
-    base_model = keras.applications.MobileNetV2(
-        input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3),
-        include_top=False,
-        weights="imagenet"
-    )
-    inputs = keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3))
-    x = base_model(inputs, training=False)
-    x = keras.layers.GlobalAveragePooling2D()(x)
-    outputs = keras.layers.Dense(1, activation="sigmoid")(x)
-    return keras.Model(inputs=inputs, outputs=outputs)
+def load_all_models():
+    eff_model = keras.models.load_model(EFFICIENTNET_PATH, compile=False)
+    mob_model = keras.models.load_model(MOBILENET_PATH, compile=False)
+    return eff_model, mob_model
 
 
 # =========================
 # PREPROCESSING GAMBAR
 # =========================
 def preprocess(file_bytes):
-    img = tf.io.decode_image(
+    image = tf.io.decode_image(
         file_bytes,
         channels=3,
         expand_animations=False
     )
+    image.set_shape([None, None, 3])
+    image = tf.image.resize(image, IMG_SIZE)
+    image = tf.cast(image, tf.float32)
+    return image
 
-    img.set_shape([None, None, 3])
 
-    img = tf.image.resize(
-        img,
-        IMG_SIZE,
-        method="bilinear"
+# =========================
+# CARI FEATURE LAYER 4D TERAKHIR
+# (Persis dari Cell 20)
+# =========================
+def find_last_4d_feature_layer(base_model):
+    for layer in reversed(base_model.layers):
+        try:
+            shape = layer.output.shape
+            if len(shape) == 4:
+                return layer
+        except Exception:
+            continue
+    raise ValueError(
+        f"Tidak menemukan layer feature map 4D pada model {base_model.name}."
     )
 
-    img = tf.cast(
-        img,
-        tf.float32
+
+# =========================
+# GRAD-CAM
+# (Persis dari Cell 20)
+# =========================
+def gradcam_from_frozen_base(
+    full_model,
+    base_model_name,
+    augmentation_layer_name,
+    gap_layer_name,
+    dropout_layer_name,
+    image_batch,
+    preprocess_layer_name=None,
+    threshold=0.5
+):
+    base_model = full_model.get_layer(base_model_name)
+    target_layer = find_last_4d_feature_layer(base_model)
+
+    feature_model = keras.Model(
+        inputs=base_model.input,
+        outputs=[target_layer.output, base_model.output],
+        name=f"{base_model.name}_gradcam_feature_model"
     )
 
-    return img
+    augmentation_layer = full_model.get_layer(augmentation_layer_name)
+    gap_layer = full_model.get_layer(gap_layer_name)
+    dropout_layer = full_model.get_layer(dropout_layer_name)
+    classifier_layer = full_model.get_layer("classifier")
 
+    with tf.GradientTape() as tape:
+        x = augmentation_layer(image_batch, training=False)
 
-# =========================
-# PREDIKSI
-# =========================
-def predict(model, image):
-    batch = image[None, ...]
+        if preprocess_layer_name is not None:
+            preprocess_layer = full_model.get_layer(preprocess_layer_name)
+            x = preprocess_layer(x, training=False)
 
-    prediction = model.predict(
-        batch,
-        verbose=0
+        conv_output, base_output = feature_model(x, training=False)
+
+        x = gap_layer(base_output)
+        x = dropout_layer(x, training=False)
+        prediction = classifier_layer(x)
+
+        prob_diabetes = prediction[:, 0]
+        predicted_class = tf.cast(prob_diabetes >= threshold, tf.int32)
+
+        class_score = tf.where(
+            predicted_class == 1,
+            prob_diabetes,
+            1.0 - prob_diabetes
+        )
+
+    gradients = tape.gradient(class_score, conv_output)
+    pooled_gradients = tf.reduce_mean(gradients, axis=(1, 2))
+
+    heatmap = tf.reduce_sum(
+        conv_output * pooled_gradients[:, tf.newaxis, tf.newaxis, :],
+        axis=-1
     )
 
-    probability = float(
-        prediction.reshape(-1)[0]
+    heatmap = tf.nn.relu(heatmap)
+
+    max_value = tf.reduce_max(heatmap, axis=(1, 2), keepdims=True)
+    heatmap = heatmap / (max_value + tf.keras.backend.epsilon())
+
+    probability = float(prob_diabetes.numpy()[0])
+    pred_label = int(predicted_class.numpy()[0])
+    confidence = probability if pred_label == 1 else (1.0 - probability)
+
+    return (
+        heatmap.numpy()[0],
+        target_layer.name,
+        probability,
+        pred_label,
+        confidence
     )
 
-    label = int(
-        probability >= THRESHOLD
-    )
-
-    if label == 1:
-        confidence = probability
-    else:
-        confidence = 1 - probability
-
-    return label, confidence, probability
-
 
 # =========================
-# MENCARI TARGET CONV LAYER
+# MEMBUAT HEATMAP & OVERLAY
+# (Persis dari Cell 20)
 # =========================
-def find_last_conv_layer(model):
-    for layer in reversed(model.layers):
-        if len(layer.output.shape) == 4:
-            return layer
-        if hasattr(layer, "layers"):
-            for sub_layer in reversed(layer.layers):
-                if len(sub_layer.output.shape) == 4:
-                    return sub_layer
-    return None
-
-
-# =========================
-# GRAD-CAM BERWARNA LENGKAP
-# =========================
-def gradcam(model, image):
-    batch = image[None, ...]
-    
-    # 1. Deteksi apakah ada sub-model backbone
-    base_model = None
-    for layer in model.layers:
-        if isinstance(layer, (keras.Model, tf.keras.Model)):
-            base_model = layer
-            break
-
-    try:
-        if base_model is not None:
-            target_layer = find_last_conv_layer(base_model)
-            feature_extractor = keras.Model(
-                inputs=base_model.inputs,
-                outputs=[target_layer.output, base_model.output]
-            )
-
-            with tf.GradientTape() as tape:
-                # Pre-processing layers (e.g. Augmentation)
-                x = batch
-                for l in model.layers:
-                    if l == base_model:
-                        break
-                    try:
-                        x = l(x, training=False)
-                    except TypeError:
-                        x = l(x)
-
-                conv_output, backbone_out = feature_extractor(x, training=False)
-
-                # Classifier head layers (GAP, Dropout, Dense)
-                x = backbone_out
-                passed_base = False
-                for l in model.layers:
-                    if passed_base:
-                        try:
-                            x = l(x, training=False)
-                        except TypeError:
-                            x = l(x)
-                    if l == base_model:
-                        passed_base = True
-
-                probability = x[:, 0]
-                predicted_label = tf.cast(probability >= THRESHOLD, tf.int32)
-                score = tf.where(predicted_label == 1, probability, 1.0 - probability)
-
-            gradients = tape.gradient(score, conv_output)
-            layer_name = target_layer.name
-
-        else:
-            target_layer = find_last_conv_layer(model)
-            grad_model = keras.Model(
-                inputs=model.inputs,
-                outputs=[target_layer.output, model.outputs[0]]
-            )
-            with tf.GradientTape() as tape:
-                conv_output, predictions = grad_model(batch, training=False)
-                probability = predictions[:, 0]
-                predicted_label = tf.cast(probability >= THRESHOLD, tf.int32)
-                score = tf.where(predicted_label == 1, probability, 1.0 - probability)
-
-            gradients = tape.gradient(score, conv_output)
-            layer_name = target_layer.name
-
-        # Bobot Grad-CAM
-        weights = tf.reduce_mean(gradients, axis=(1, 2))
-        heatmap = tf.reduce_sum(conv_output * weights[:, None, None, :], axis=-1)
-        heatmap = tf.nn.relu(heatmap)
-
-        # Normalisasi ke skala 0 - 1
-        max_val = tf.reduce_max(heatmap, axis=(1, 2), keepdims=True)
-        heatmap = heatmap / (max_val + tf.keras.backend.epsilon())
-
-        return heatmap[0].numpy(), layer_name
-
-    except Exception:
-        # Saliency map fallback jika graph terputus
-        with tf.GradientTape() as tape:
-            tape.watch(batch)
-            preds = model(batch, training=False)
-            prob = preds[:, 0]
-            pred_label = tf.cast(prob >= THRESHOLD, tf.int32)
-            score = tf.where(pred_label == 1, prob, 1.0 - prob)
-
-        input_grads = tape.gradient(score, batch)
-        heatmap = tf.reduce_mean(tf.abs(input_grads), axis=-1)[0]
-        heatmap = tf.nn.relu(heatmap)
-        max_val = tf.math.reduce_max(heatmap)
-        if max_val > 0:
-            heatmap = heatmap / max_val
-        return heatmap.numpy(), "Aktivasi Fitur"
-
-
-# =========================
-# MEMBUAT HEATMAP WARNA (JET) & OVERLAY
-# =========================
-def make_overlay(image, heatmap, alpha=0.45):
-    # Resize heatmap sesuai ukuran gambar
+def create_overlay(original_image, heatmap, alpha=0.4):
     heatmap_resized = tf.image.resize(
-        heatmap[..., None],
-        IMG_SIZE,
-        method="bicubic"
+        heatmap[..., np.newaxis],
+        (original_image.shape[0], original_image.shape[1])
     ).numpy().squeeze()
 
-    # Normalisasi kontras agar rentang warna merah & biru keluar maksimal
-    heatmap_min = np.min(heatmap_resized)
-    heatmap_max = np.max(heatmap_resized)
-    if heatmap_max > heatmap_min:
-        heatmap_resized = (heatmap_resized - heatmap_min) / (heatmap_max - heatmap_min)
-    else:
-        heatmap_resized = np.zeros_like(heatmap_resized)
+    heatmap_resized = np.clip(heatmap_resized, 0, 1)
 
-    # Memberi warna Grad-CAM menggunakan colormap 'jet'
-    colored_heatmap = plt.get_cmap("jet")(heatmap_resized)[..., :3]
+    jet_map = plt.get_cmap("jet")
+    colored_heatmap = jet_map(heatmap_resized)[..., :3]
 
-    # Normalisasi citra asli ke rentang [0, 1]
-    original = np.clip(image / 255.0, 0.0, 1.0)
+    original_float = original_image.astype(np.float32)
+    if original_float.max() > 1.0:
+        original_float = original_float / 255.0
 
-    # Menggabungkan gambar asli dengan warna heatmap
-    overlay = np.clip((1 - alpha) * original + alpha * colored_heatmap, 0.0, 1.0)
+    overlay = (1 - alpha) * original_float + alpha * colored_heatmap
+    overlay = np.clip(overlay, 0, 1)
 
     return colored_heatmap, overlay
 
@@ -374,7 +238,7 @@ st.markdown(
 # =========================
 st.title("Deteksi T2DM dari Citra Lidah")
 st.write(
-    "Unggah citra lidah untuk melakukan inferensi perbandingan "
+    "Unggah citra lidah untuk melakukan analisis komparasi "
     "menggunakan model **EfficientNet-B0** dan **MobileNetV2**."
 )
 
@@ -411,8 +275,8 @@ if uploaded is not None:
     with right_col:
         st.write("### Siap untuk Evaluasi")
         st.write(
-            "Citra akan diproses secara paralel ke dalam model "
-            "**EfficientNet-B0** dan **MobileNetV2** beserta visualisasi Grad-CAM masing-masing."
+            "Citra akan diproses ke dalam model **EfficientNet-B0** dan **MobileNetV2** "
+            "beserta visualisasi Grad-CAM masing-masing."
         )
         detect_button = st.button(
             "Jalankan Deteksi Komparasi",
@@ -425,27 +289,53 @@ if uploaded is not None:
     # =========================
     if detect_button:
 
-        with st.spinner("Memuat model dan melakukan inferensi..."):
+        with st.spinner("Memuat model dan menjalankan Grad-CAM..."):
 
-            # 1. Load model
-            eff_model = load_efficientnet()
-            mob_model = load_mobilenet()
+            # 1. Load Model
+            eff_model, mob_model = load_all_models()
 
-            if eff_model is None or mob_model is None:
-                st.stop()
+            # 2. Preprocessing tensor gambar
+            image_tensor = preprocess(file_bytes)
+            image_np = image_tensor.numpy()
+            image_batch = tf.expand_dims(image_tensor, axis=0)
 
-            # 2. Preprocessing
-            image = preprocess(file_bytes)
+            # 3. Grad-CAM EfficientNet-B0
+            (
+                heatmap_eff,
+                layer_eff,
+                prob_eff,
+                label_eff,
+                conf_eff
+            ) = gradcam_from_frozen_base(
+                full_model=eff_model,
+                base_model_name="efficientnetb0_base",
+                augmentation_layer_name="augmentation_efficientnetb0",
+                preprocess_layer_name=None,
+                gap_layer_name="gap_efficientnetb0",
+                dropout_layer_name="dropout_efficientnetb0",
+                image_batch=image_batch,
+                threshold=THRESHOLD
+            )
+            colored_eff, overlay_eff = create_overlay(image_np, heatmap_eff, alpha=0.4)
 
-            # 3. Prediksi & Grad-CAM EfficientNet-B0
-            eff_label, eff_conf, _ = predict(eff_model, image)
-            eff_heatmap, eff_layer = gradcam(eff_model, image)
-            eff_colored, eff_overlay = make_overlay(image.numpy(), eff_heatmap)
-
-            # 4. Prediksi & Grad-CAM MobileNetV2
-            mob_label, mob_conf, _ = predict(mob_model, image)
-            mob_heatmap, mob_layer = gradcam(mob_model, image)
-            mob_colored, mob_overlay = make_overlay(image.numpy(), mob_heatmap)
+            # 4. Grad-CAM MobileNetV2
+            (
+                heatmap_mob,
+                layer_mob,
+                prob_mob,
+                label_mob,
+                conf_mob
+            ) = gradcam_from_frozen_base(
+                full_model=mob_model,
+                base_model_name="mobilenetv2_base",
+                augmentation_layer_name="augmentation_mobilenetv2",
+                preprocess_layer_name="mobilenetv2_preprocess",
+                gap_layer_name="gap_mobilenetv2",
+                dropout_layer_name="dropout_mobilenetv2",
+                image_batch=image_batch,
+                threshold=THRESHOLD
+            )
+            colored_mob, overlay_mob = create_overlay(image_np, heatmap_mob, alpha=0.4)
 
         st.markdown("---")
 
@@ -462,33 +352,33 @@ if uploaded is not None:
 
             m1, m2 = st.columns(2)
             with m1:
-                st.metric("Prediksi", CLASS_NAMES[eff_label])
+                st.metric("Prediksi", CLASS_NAMES[label_eff])
             with m2:
-                st.metric("Confidence", f"{eff_conf * 100:.2f}%")
+                st.metric("Confidence", f"{conf_eff * 100:.2f}%")
 
-            st.progress(min(max(eff_conf, 0.0), 1.0))
+            st.progress(min(max(conf_eff, 0.0), 1.0))
 
-            if eff_label == 1:
-                st.error(f"Status: **{CLASS_NAMES[eff_label]}**")
+            if label_eff == 1:
+                st.error(f"Status: **{CLASS_NAMES[label_eff]}** (P={prob_eff:.4f})")
             else:
-                st.success(f"Status: **{CLASS_NAMES[eff_label]}**")
+                st.success(f"Status: **{CLASS_NAMES[label_eff]}** (P={prob_eff:.4f})")
 
             st.write("**Visualisasi Grad-CAM:**")
             g_col1, g_col2 = st.columns(2)
             with g_col1:
                 st.image(
-                    eff_colored,
-                    caption="Heatmap (Jet)",
+                    colored_eff,
+                    caption="Grad-CAM Heatmap",
                     use_container_width=True
                 )
             with g_col2:
                 st.image(
-                    eff_overlay,
-                    caption="Overlay",
+                    overlay_eff,
+                    caption="Grad-CAM Overlay",
                     use_container_width=True
                 )
 
-            st.caption(f"Layer Target: `{eff_layer}`")
+            st.caption(f"Layer Target: `{layer_eff}`")
 
         # -----------------------------
         # KOLOM KANAN: MOBILENETV2
@@ -498,33 +388,33 @@ if uploaded is not None:
 
             m3, m4 = st.columns(2)
             with m3:
-                st.metric("Prediksi", CLASS_NAMES[mob_label])
+                st.metric("Prediksi", CLASS_NAMES[label_mob])
             with m4:
-                st.metric("Confidence", f"{mob_conf * 100:.2f}%")
+                st.metric("Confidence", f"{conf_mob * 100:.2f}%")
 
-            st.progress(min(max(mob_conf, 0.0), 1.0))
+            st.progress(min(max(conf_mob, 0.0), 1.0))
 
-            if mob_label == 1:
-                st.error(f"Status: **{CLASS_NAMES[mob_label]}**")
+            if label_mob == 1:
+                st.error(f"Status: **{CLASS_NAMES[label_mob]}** (P={prob_mob:.4f})")
             else:
-                st.success(f"Status: **{CLASS_NAMES[mob_label]}**")
+                st.success(f"Status: **{CLASS_NAMES[label_mob]}** (P={prob_mob:.4f})")
 
             st.write("**Visualisasi Grad-CAM:**")
             g_col3, g_col4 = st.columns(2)
             with g_col3:
                 st.image(
-                    mob_colored,
-                    caption="Heatmap (Jet)",
+                    colored_mob,
+                    caption="Grad-CAM Heatmap",
                     use_container_width=True
                 )
             with g_col4:
                 st.image(
-                    mob_overlay,
-                    caption="Overlay",
+                    overlay_mob,
+                    caption="Grad-CAM Overlay",
                     use_container_width=True
                 )
 
-            st.caption(f"Layer Target: `{mob_layer}`")
+            st.caption(f"Layer Target: `{layer_mob}`")
 
         st.markdown("---")
 
@@ -533,13 +423,12 @@ if uploaded is not None:
         # ==========================================
         st.subheader("Ringkasan Konsensus Model")
 
-        is_consensus = (eff_label == mob_label)
-        if is_consensus:
+        if label_eff == label_mob:
             st.info(
-                f"**Konsensus:** Kedua arsitektur sepakat mengklasifikasikan citra sebagai **{CLASS_NAMES[eff_label]}**."
+                f"**Konsensus:** Kedua arsitektur sepakat mengklasifikasikan citra sebagai **{CLASS_NAMES[label_eff]}**."
             )
         else:
             st.warning(
-                f"**Perbedaan Prediksi:** EfficientNet-B0 mendeteksi **{CLASS_NAMES[eff_label]}** ({eff_conf*100:.1f}%), "
-                f"sedangkan MobileNetV2 mendeteksi **{CLASS_NAMES[mob_label]}** ({mob_conf*100:.1f}%)."
+                f"**Perbedaan Prediksi:** EfficientNet-B0 mendeteksi **{CLASS_NAMES[label_eff]}** ({conf_eff*100:.1f}%), "
+                f"sedangkan MobileNetV2 mendeteksi **{CLASS_NAMES[label_mob]}** ({conf_mob*100:.1f}%)."
             )

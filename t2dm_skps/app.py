@@ -161,108 +161,79 @@ def predict(model, image):
 
 
 # =========================
-# GRAD-CAM FORWARD-TRACE (ZERO ERROR)
+# GRAD-CAM VIA DIRECT FORWARD PASS
 # =========================
 def gradcam(model, image):
     batch = image[None, ...]
 
-    # 1. Identifikasi apakah model memiliki Base Model bertingkat
+    # Cari base_model jika ada
     base_model = None
     for layer in model.layers:
         if isinstance(layer, (keras.Model, tf.keras.Model)):
             base_model = layer
             break
 
-    # KASUS A: Model Nested (Memiliki Base Model Backbone)
-    if base_model is not None:
-        # Cari layer 4D terakhir di base model
-        target_layer = None
-        for l in reversed(base_model.layers):
-            try:
-                if len(l.output.shape) == 4:
-                    target_layer = l
-                    break
-            except Exception:
-                pass
-
-        feature_submodel = keras.Model(
-            inputs=base_model.inputs,
-            outputs=[target_layer.output, base_model.output]
-        )
-
-        with tf.GradientTape() as tape:
+    target_layer_name = "conv_head"
+    
+    with tf.GradientTape() as tape:
+        if base_model is not None:
+            # 1. Forward layer sebelum base_model
             x = batch
-            # Lewati layer pra-backbone (e.g. Augmentation / Rescaling)
             for l in model.layers:
                 if l == base_model:
                     break
                 x = l(x, training=False)
 
-            conv_output, backbone_out = feature_submodel(x, training=False)
+            # 2. Forward layer demi layer di dalam base_model untuk melacak conv terakhir
+            conv_output = None
+            for sub_layer in base_model.layers:
+                x = sub_layer(x)
+                if len(x.shape) == 4:
+                    conv_output = x
+                    target_layer_name = sub_layer.name
+            
+            tape.watch(conv_output)
 
-            # Lewati layer pasca-backbone (GAP, Dropout, Dense)
-            x = backbone_out
+            # 3. Forward layer sesudah base_model
+            x_after = x
             passed_base = False
             for l in model.layers:
                 if passed_base:
-                    x = l(x, training=False)
+                    x_after = l(x_after, training=False)
                 if l == base_model:
                     passed_base = True
 
-            prob = x[:, 0]
-            pred_label = tf.cast(prob >= THRESHOLD, tf.int32)
-            score = tf.where(pred_label == 1, prob, 1.0 - prob)
-
-        grads = tape.gradient(score, conv_output)
-
-    # KASUS B: Model Sequential / Functional Biasa
-    else:
-        target_layer = None
-        for l in reversed(model.layers):
-            try:
-                if len(l.output.shape) == 4:
-                    target_layer = l
-                    break
-            except Exception:
-                pass
-
-        # Split eksekusi: input -> conv -> output
-        feature_submodel = keras.Model(inputs=model.inputs, outputs=target_layer.output)
-
-        with tf.GradientTape() as tape:
-            conv_output = feature_submodel(batch, training=False)
-            tape.watch(conv_output)
-
-            # Forward sisa layer setelah layer target
-            x = conv_output
-            passed_target = False
+            prob = x_after[:, 0]
+        else:
+            # Model tanpa wrapper submodel
+            conv_output = None
+            x = batch
             for l in model.layers:
-                if passed_target:
-                    x = l(x, training=False)
-                if l.name == target_layer.name:
-                    passed_target = True
-
+                x = l(x, training=False)
+                if len(x.shape) == 4:
+                    conv_output = x
+                    target_layer_name = l.name
+            
+            tape.watch(conv_output)
             prob = x[:, 0]
-            pred_label = tf.cast(prob >= THRESHOLD, tf.int32)
-            score = tf.where(pred_label == 1, prob, 1.0 - prob)
 
-        grads = tape.gradient(score, conv_output)
+        pred_label = tf.cast(prob >= THRESHOLD, tf.int32)
+        score = tf.where(pred_label == 1, prob, 1.0 - prob)
 
-    # Hitung bobot rata-rata Grad-CAM
+    # Bobot gradien terhadap feature map konvolusi
+    grads = tape.gradient(score, conv_output)
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-    conv_output_0 = conv_output[0]
 
-    # Linear combination
+    conv_output_0 = conv_output[0]
     heatmap = conv_output_0 @ pooled_grads[..., tf.newaxis]
     heatmap = tf.squeeze(heatmap)
     heatmap = tf.maximum(heatmap, 0.0)
 
-    # Normalisasi 0 - 1
     max_val = tf.math.reduce_max(heatmap)
     if max_val > 0:
         heatmap = heatmap / max_val
 
-    return heatmap.numpy(), target_layer.name
+    return heatmap.numpy(), target_layer_name
 
 
 # =========================
@@ -529,4 +500,3 @@ if uploaded is not None:
                 f"**Perbedaan Prediksi:** EfficientNet-B0 mendeteksi **{CLASS_NAMES[eff_label]}** ({eff_conf*100:.1f}%), "
                 f"sedangkan MobileNetV2 mendeteksi **{CLASS_NAMES[mob_label]}** ({mob_conf*100:.1f}%)."
             )
-            

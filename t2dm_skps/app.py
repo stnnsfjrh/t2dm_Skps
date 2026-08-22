@@ -6,6 +6,7 @@ import streamlit as st
 import tensorflow as tf
 from PIL import Image
 from tensorflow import keras
+from tensorflow.keras import layers
 
 
 # =========================
@@ -23,14 +24,82 @@ CLASS_NAMES = [
 ]
 
 
+# ==========================================
+# PEMBUATAN ARSITEKTUR NATIVE (DARI CELL 7 & 9)
+# ==========================================
+def build_data_augmentation(name):
+    return keras.Sequential(
+        [
+            layers.RandomFlip(mode="horizontal", seed=42),
+            layers.RandomRotation(factor=0.03, fill_mode="reflect", seed=43),
+            layers.RandomZoom(height_factor=(-0.08, 0.08), width_factor=(-0.08, 0.08), fill_mode="reflect", seed=44),
+            layers.RandomTranslation(height_factor=0.05, width_factor=0.05, fill_mode="reflect", seed=45),
+            layers.RandomContrast(factor=0.10, seed=46),
+        ],
+        name=name
+    )
+
+
 # =========================
-# LOAD MODEL
+# LOAD MODEL EFFICIENTNET-B0
 # =========================
 @st.cache_resource
-def load_all_models():
-    eff_model = keras.models.load_model(EFFICIENTNET_PATH, compile=False)
-    mob_model = keras.models.load_model(MOBILENET_PATH, compile=False)
-    return eff_model, mob_model
+def load_efficientnet():
+    try:
+        return keras.models.load_model(EFFICIENTNET_PATH, compile=False, safe_mode=False)
+    except Exception:
+        # Rekonstruksi jika deserialisasi gagal
+        inputs = layers.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3), name="input_image")
+        aug = build_data_augmentation("augmentation_efficientnetb0")
+        x = aug(inputs)
+        base_model = keras.applications.EfficientNetB0(
+            include_top=False,
+            weights=None,
+            input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3),
+            name="efficientnetb0_base"
+        )
+        x = base_model(x)
+        x = layers.GlobalAveragePooling2D(name="gap_efficientnetb0")(x)
+        x = layers.Dropout(0.3, name="dropout_efficientnetb0")(x)
+        outputs = layers.Dense(1, activation="sigmoid", name="classifier")(x)
+        
+        model = keras.Model(inputs=inputs, outputs=outputs, name="efficientnetb0_best")
+        model.load_weights(str(EFFICIENTNET_PATH))
+        return model
+
+
+# =========================
+# LOAD MODEL MOBILENETV2
+# =========================
+@st.cache_resource
+def load_mobilenet():
+    # Rekonstruksi arsitektur persis Cell 9 untuk mengatasi lambda deserialization
+    inputs = layers.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3), name="input_image")
+    aug = build_data_augmentation("augmentation_mobilenetv2")
+    x = aug(inputs)
+    
+    preprocess_layer = layers.Lambda(
+        keras.applications.mobilenet_v2.preprocess_input,
+        name="mobilenetv2_preprocess"
+    )
+    x = preprocess_layer(x)
+    
+    base_model = keras.applications.MobileNetV2(
+        include_top=False,
+        weights=None,
+        input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3),
+        name="mobilenetv2_base"
+    )
+    x = base_model(x)
+    x = layers.GlobalAveragePooling2D(name="gap_mobilenetv2")(x)
+    x = layers.Dropout(0.3, name="dropout_mobilenetv2")(x)
+    outputs = layers.Dense(1, activation="sigmoid", name="classifier")(x)
+    
+    model = keras.Model(inputs=inputs, outputs=outputs, name="mobilenetv2_best")
+    
+    # Load bobot yang telah dilatih
+    model.load_weights(str(MOBILENET_PATH))
+    return model
 
 
 # =========================
@@ -66,7 +135,7 @@ def find_last_4d_feature_layer(base_model):
 
 
 # =========================
-# GRAD-CAM
+# GRAD-CAM DARI FROZEN BASE
 # (Persis dari Cell 20)
 # =========================
 def gradcam_from_frozen_base(
@@ -238,7 +307,7 @@ st.markdown(
 # =========================
 st.title("Deteksi T2DM dari Citra Lidah")
 st.write(
-    "Unggah citra lidah untuk melakukan analisis komparasi "
+    "Unggah citra lidah untuk melakukan inferensi perbandingan "
     "menggunakan model **EfficientNet-B0** dan **MobileNetV2**."
 )
 
@@ -275,8 +344,8 @@ if uploaded is not None:
     with right_col:
         st.write("### Siap untuk Evaluasi")
         st.write(
-            "Citra akan diproses ke dalam model **EfficientNet-B0** dan **MobileNetV2** "
-            "beserta visualisasi Grad-CAM masing-masing."
+            "Citra akan diproses secara paralel ke dalam model "
+            "**EfficientNet-B0** dan **MobileNetV2** beserta visualisasi Grad-CAM masing-masing."
         )
         detect_button = st.button(
             "Jalankan Deteksi Komparasi",
@@ -292,7 +361,8 @@ if uploaded is not None:
         with st.spinner("Memuat model dan menjalankan Grad-CAM..."):
 
             # 1. Load Model
-            eff_model, mob_model = load_all_models()
+            eff_model = load_efficientnet()
+            mob_model = load_mobilenet()
 
             # 2. Preprocessing tensor gambar
             image_tensor = preprocess(file_bytes)

@@ -85,7 +85,7 @@ def predict(model, image):
     else:
         confidence = 1 - probability
 
-    return label, confidence
+    return label, confidence, probability
 
 
 # =========================
@@ -311,7 +311,7 @@ st.markdown(
 
 
     .main .block-container {
-        max-width: 760px;
+        max-width: 820px;
         padding-top: 3rem;
         padding-bottom: 3rem;
     }
@@ -429,7 +429,7 @@ if uploaded is not None:
 
 
     # =========================
-    # TAMPILKAN GAMBAR
+    # TAMPILKAN GAMBAR INPUT
     # =========================
     st.image(
         display_img,
@@ -454,7 +454,7 @@ if uploaded is not None:
     if detect_button:
 
         with st.spinner(
-            "Sedang melakukan deteksi..."
+            "Sedang melakukan deteksi dengan EfficientNet-B0..."
         ):
 
             # Load model
@@ -466,7 +466,7 @@ if uploaded is not None:
             )
 
             # Prediksi
-            label, confidence = predict(
+            label, confidence, raw_prob = predict(
                 model,
                 image
             )
@@ -484,83 +484,76 @@ if uploaded is not None:
             )
 
 
-        # =========================
-        # HASIL DETEKSI
-        # =========================
-        st.subheader(
-            "Hasil Deteksi"
-        )
+        # ==========================================
+        # HASIL DETEKSI EFFICIENTNET-B0
+        # ==========================================
+        st.subheader("Hasil Inferensi EfficientNet-B0")
 
-        st.success(
-            f"Hasil Klasifikasi: {CLASS_NAMES[label]}"
-        )
+        metric_col1, metric_col2 = st.columns(2)
+        with metric_col1:
+            st.metric(
+                label="Prediksi Kelas",
+                value=CLASS_NAMES[label]
+            )
+        with metric_col2:
+            st.metric(
+                label="Keyakinan (Confidence)",
+                value=f"{confidence * 100:.2f}%"
+            )
 
+        st.progress(min(max(confidence, 0.0), 1.0))
+
+        if label == 1:
+            st.error(f"Hasil Klasifikasi: **{CLASS_NAMES[label]}**")
+        else:
+            st.success(f"Hasil Klasifikasi: **{CLASS_NAMES[label]}**")
+
+        st.markdown("---")
+
+
+        # ==========================================
+        # VISUALISASI KOMPARASI CITRA
+        # ==========================================
+        st.subheader("Analisis Visual & Grad-CAM")
         st.write(
-            f"**Tingkat Keyakinan Model: "
-            f"{confidence * 100:.2f}%**"
+            "Perbandingan citra dari input asli, pemrosesan model, "
+            "hingga pemetaan area relevansi menggunakan Grad-CAM."
         )
 
+        col_a, col_b, col_c, col_d = st.columns(4)
 
-        # =========================
-        # HASIL GRAD-CAM
-        # =========================
-        st.subheader(
-            "Analisis Grad-CAM"
-        )
-
-        st.write(
-            "Grad-CAM menunjukkan bagian citra yang relatif "
-            "memberikan kontribusi terhadap keputusan model."
-        )
-
-
-        # =========================
-        # TAMPILKAN 3 GAMBAR
-        # =========================
-        col1, col2, col3 = st.columns(3)
-
-
-        # Gambar asli
-        with col1:
-
+        with col_a:
             st.image(
-                np.clip(
-                    image.numpy() / 255.0,
-                    0,
-                    1
-                ),
-                caption="Citra Asli",
+                display_img,
+                caption="1. Citra Asli (Upload)",
                 use_container_width=True
             )
 
+        with col_b:
+            st.image(
+                np.clip(image.numpy() / 255.0, 0, 1),
+                caption=f"2. Input Model ({IMG_SIZE[0]}x{IMG_SIZE[1]})",
+                use_container_width=True
+            )
 
-        # Heatmap
-        with col2:
-
+        with col_c:
             st.image(
                 colored_heatmap,
-                caption="Heatmap Grad-CAM",
+                caption="3. Heatmap Grad-CAM",
                 use_container_width=True
             )
 
-
-        # Overlay
-        with col3:
-
+        with col_d:
             st.image(
                 overlay,
-                caption="Overlay Grad-CAM",
+                caption="4. Overlay Grad-CAM",
                 use_container_width=True
             )
 
-
-        # Nama feature layer
         st.caption(
-            f"Feature layer yang digunakan: {layer_name}"
+            f"Feature layer EfficientNet-B0 yang dianalisis: `{layer_name}`"
         )
 
-
-        # Informasi Grad-CAM
         st.info(
             "Area berwarna merah atau kuning menunjukkan bagian "
             "yang relatif memberikan kontribusi lebih besar terhadap "

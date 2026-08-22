@@ -74,8 +74,8 @@ def load_mobilenet():
 
         inputs = keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3))
         x = base_model(inputs, training=False)
-        x = keras.layers.GlobalAveragePooling2D()(x)
-        x = keras.layers.Dropout(0.2)(x)
+        x = keras.layers.GlobalAveragePooling2D(name="gap_mobilenetv2")(x)
+        x = keras.layers.Dropout(0.2, name="dropout_mobilenetv2")(x)
         outputs = keras.layers.Dense(1, activation="sigmoid", name="classifier")(x)
 
         model = keras.Model(inputs=inputs, outputs=outputs)
@@ -161,79 +161,115 @@ def predict(model, image):
 
 
 # =========================
-# GRAD-CAM VIA DIRECT FORWARD PASS
+# GRAD-CAM (ROBUST LAYER EXTRACTION)
 # =========================
+def find_last_conv_layer(model):
+    for layer in reversed(model.layers):
+        if len(layer.output.shape) == 4:
+            return layer
+        if hasattr(layer, "layers"):
+            for sub_layer in reversed(layer.layers):
+                if len(sub_layer.output.shape) == 4:
+                    return sub_layer
+    raise ValueError("Layer konvolusi 4D tidak ditemukan.")
+
+
 def gradcam(model, image):
     batch = image[None, ...]
-
-    # Cari base_model jika ada
+    
+    # 1. Cek apakah ada base_model
     base_model = None
     for layer in model.layers:
         if isinstance(layer, (keras.Model, tf.keras.Model)):
             base_model = layer
             break
 
-    target_layer_name = "conv_head"
-    
-    with tf.GradientTape() as tape:
+    # Kasus A: Jika model memiliki struktur seperti kode awal Anda
+    try:
         if base_model is not None:
-            # 1. Forward layer sebelum base_model
-            x = batch
-            for l in model.layers:
-                if l == base_model:
-                    break
-                x = l(x, training=False)
+            # Ambil target conv layer dari base_model
+            target_layer = find_last_conv_layer(base_model)
+            feature_model = keras.Model(
+                inputs=base_model.input,
+                outputs=[target_layer.output, base_model.output]
+            )
 
-            # 2. Forward layer demi layer di dalam base_model untuk melacak conv terakhir
-            conv_output = None
-            for sub_layer in base_model.layers:
-                x = sub_layer(x)
-                if len(x.shape) == 4:
-                    conv_output = x
-                    target_layer_name = sub_layer.name
+            # Cek layer komponen
+            layer_names = [l.name for l in model.layers]
             
-            tape.watch(conv_output)
+            with tf.GradientTape() as tape:
+                # Pre-processing / augmentation
+                x = batch
+                for l in model.layers:
+                    if l == base_model:
+                        break
+                    try:
+                        x = l(x, training=False)
+                    except TypeError:
+                        x = l(x)
 
-            # 3. Forward layer sesudah base_model
-            x_after = x
-            passed_base = False
-            for l in model.layers:
-                if passed_base:
-                    x_after = l(x_after, training=False)
-                if l == base_model:
-                    passed_base = True
+                conv_output, features = feature_model(x, training=False)
 
-            prob = x_after[:, 0]
+                # Post-processing / classifier
+                x = features
+                found_base = False
+                for l in model.layers:
+                    if found_base:
+                        try:
+                            x = l(x, training=False)
+                        except TypeError:
+                            x = l(x)
+                    if l == base_model:
+                        found_base = True
+
+                probability = x[:, 0]
+                predicted_label = tf.cast(probability >= THRESHOLD, tf.int32)
+                score = tf.where(predicted_label == 1, probability, 1.0 - probability)
+
+            gradients = tape.gradient(score, conv_output)
+            layer_name = target_layer.name
+
         else:
-            # Model tanpa wrapper submodel
-            conv_output = None
-            x = batch
-            for l in model.layers:
-                x = l(x, training=False)
-                if len(x.shape) == 4:
-                    conv_output = x
-                    target_layer_name = l.name
-            
-            tape.watch(conv_output)
-            prob = x[:, 0]
+            target_layer = find_last_conv_layer(model)
+            grad_model = keras.Model(
+                inputs=model.inputs,
+                outputs=[target_layer.output, model.outputs[0]]
+            )
+            with tf.GradientTape() as tape:
+                conv_output, predictions = grad_model(batch, training=False)
+                probability = predictions[:, 0]
+                predicted_label = tf.cast(probability >= THRESHOLD, tf.int32)
+                score = tf.where(predicted_label == 1, probability, 1.0 - probability)
 
-        pred_label = tf.cast(prob >= THRESHOLD, tf.int32)
-        score = tf.where(pred_label == 1, prob, 1.0 - prob)
+            gradients = tape.gradient(score, conv_output)
+            layer_name = target_layer.name
 
-    # Bobot gradien terhadap feature map konvolusi
-    grads = tape.gradient(score, conv_output)
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+        # Hitung Grad-CAM
+        weights = tf.reduce_mean(gradients, axis=(1, 2))
+        heatmap = tf.reduce_sum(conv_output * weights[:, None, None, :], axis=-1)
+        heatmap = tf.nn.relu(heatmap)
 
-    conv_output_0 = conv_output[0]
-    heatmap = conv_output_0 @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
-    heatmap = tf.maximum(heatmap, 0.0)
+        max_val = tf.reduce_max(heatmap, axis=(1, 2), keepdims=True)
+        heatmap = heatmap / (max_val + tf.keras.backend.epsilon())
 
-    max_val = tf.math.reduce_max(heatmap)
-    if max_val > 0:
-        heatmap = heatmap / max_val
+        return heatmap[0].numpy(), layer_name
 
-    return heatmap.numpy(), target_layer_name
+    except Exception:
+        # Fallback jika graph extraction tidak didukung: gunakan gradien langsung terhadap input image
+        with tf.GradientTape() as tape:
+            tape.watch(batch)
+            preds = model(batch, training=False)
+            prob = preds[:, 0]
+            pred_label = tf.cast(prob >= THRESHOLD, tf.int32)
+            score = tf.where(pred_label == 1, prob, 1.0 - prob)
+
+        input_grads = tape.gradient(score, batch)
+        heatmap = tf.reduce_mean(tf.abs(input_grads), axis=-1)[0]
+        heatmap = tf.nn.relu(heatmap)
+        max_val = tf.math.reduce_max(heatmap)
+        if max_val > 0:
+            heatmap = heatmap / max_val
+        return heatmap.numpy(), "Saliency-Map"
 
 
 # =========================

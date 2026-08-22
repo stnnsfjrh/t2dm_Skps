@@ -14,7 +14,8 @@ from tensorflow import keras
 IMG_SIZE = (224, 224)
 THRESHOLD = 0.5
 
-MODEL_PATH = Path(__file__).parent / "efficientnetb0_best.keras"
+EFFICIENTNET_PATH = Path(__file__).parent / "efficientnetb0_best.keras"
+MOBILENET_PATH = Path(__file__).parent / "mobilenetv2_best.keras"
 
 CLASS_NAMES = [
     "Non-Diabetes",
@@ -26,11 +27,16 @@ CLASS_NAMES = [
 # LOAD MODEL
 # =========================
 @st.cache_resource
-def load_model():
-    return keras.models.load_model(
-        MODEL_PATH,
+def load_all_models():
+    eff_model = keras.models.load_model(
+        EFFICIENTNET_PATH,
         compile=False
     )
+    mob_model = keras.models.load_model(
+        MOBILENET_PATH,
+        compile=False
+    )
+    return eff_model, mob_model
 
 
 # =========================
@@ -109,125 +115,79 @@ def last_feature_layer(base_model):
 
 
 # =========================
-# GRAD-CAM
+# GRAD-CAM GENERIK
+# (Bekerja untuk Sub-model maupun Sequential/Functional)
 # =========================
 def gradcam(model, image):
 
     batch = image[None, ...]
 
-    # Mengambil layer dari model
-    augmentation = model.get_layer(
-        "augmentation_efficientnetb0"
-    )
+    # Cek apakah model memiliki sub-model (base model) atau merupakan single graph
+    base_model = None
+    for layer in model.layers:
+        if isinstance(layer, keras.Model):
+            base_model = layer
+            break
 
-    base_model = model.get_layer(
-        "efficientnetb0_base"
-    )
-
-    gap = model.get_layer(
-        "gap_efficientnetb0"
-    )
-
-    dropout = model.get_layer(
-        "dropout_efficientnetb0"
-    )
-
-    classifier = model.get_layer(
-        "classifier"
-    )
-
-    # Cari feature map terakhir
-    target_layer = last_feature_layer(
-        base_model
-    )
-
-    # Model sementara untuk mendapatkan:
-    # 1. feature map target
-    # 2. output EfficientNetB0
-    feature_model = keras.Model(
-        base_model.input,
-        [
-            target_layer.output,
-            base_model.output
-        ]
-    )
-
-    # =========================
-    # HITUNG GRADIENT
-    # =========================
-    with tf.GradientTape() as tape:
-
-        x = augmentation(
-            batch,
-            training=False
+    # 1. Kasus jika arsitektur menggunakan Base Model bertingkat
+    if base_model is not None:
+        target_layer = last_feature_layer(base_model)
+        feature_model = keras.Model(
+            base_model.input,
+            [target_layer.output, base_model.output]
         )
 
-        conv_output, features = feature_model(
-            x,
-            training=False
+        with tf.GradientTape() as tape:
+            # Lewati layer sebelum base_model jika ada
+            x = batch
+            for layer in model.layers:
+                if layer == base_model:
+                    break
+                x = layer(x, training=False)
+
+            conv_output, features = feature_model(x, training=False)
+
+            # Lewati layer setelah base_model
+            x = features
+            found_base = False
+            for layer in model.layers:
+                if found_base:
+                    x = layer(x, training=False)
+                if layer == base_model:
+                    found_base = True
+
+            probability = x[:, 0]
+            predicted_label = tf.cast(probability >= THRESHOLD, tf.int32)
+            score = tf.where(predicted_label == 1, probability, 1 - probability)
+
+        gradients = tape.gradient(score, conv_output)
+
+    # 2. Kasus jika arsitektur satu grafik datar (Flat Model)
+    else:
+        target_layer = last_feature_layer(model)
+        grad_model = keras.Model(
+            model.input,
+            [target_layer.output, model.output]
         )
 
-        x = gap(features)
+        with tf.GradientTape() as tape:
+            conv_output, predictions = grad_model(batch, training=False)
+            probability = predictions[:, 0]
+            predicted_label = tf.cast(probability >= THRESHOLD, tf.int32)
+            score = tf.where(predicted_label == 1, probability, 1 - probability)
 
-        x = dropout(
-            x,
-            training=False
-        )
+        gradients = tape.gradient(score, conv_output)
 
-        probability = classifier(x)[:, 0]
+    weights = tf.reduce_mean(gradients, axis=(1, 2))
+    heatmap = tf.reduce_sum(conv_output * weights[:, None, None, :], axis=-1)
+    heatmap = tf.nn.relu(heatmap)
 
-        predicted_label = tf.cast(
-            probability >= THRESHOLD,
-            tf.int32
-        )
-
-        # Score disesuaikan dengan kelas
-        # yang diprediksi model
-        score = tf.where(
-            predicted_label == 1,
-            probability,
-            1 - probability
-        )
-
-    # Gradient terhadap feature map
-    gradients = tape.gradient(
-        score,
-        conv_output
-    )
-
-    # Bobot setiap channel
-    weights = tf.reduce_mean(
-        gradients,
-        axis=(1, 2)
-    )
-
-    # Membentuk heatmap
-    heatmap = tf.reduce_sum(
-        conv_output *
-        weights[:, None, None, :],
-        axis=-1
-    )
-
-    # Hilangkan nilai negatif
-    heatmap = tf.nn.relu(
-        heatmap
-    )
-
-    # Normalisasi 0-1
     heatmap = heatmap / (
-        tf.reduce_max(
-            heatmap,
-            axis=(1, 2),
-            keepdims=True
-        )
-        +
-        tf.keras.backend.epsilon()
+        tf.reduce_max(heatmap, axis=(1, 2), keepdims=True)
+        + tf.keras.backend.epsilon()
     )
 
-    return (
-        heatmap[0].numpy(),
-        target_layer.name
-    )
+    return heatmap[0].numpy(), target_layer.name
 
 
 # =========================
@@ -239,35 +199,19 @@ def make_overlay(
     alpha=0.4
 ):
 
-    # Resize heatmap sesuai ukuran gambar
     heatmap = tf.image.resize(
         heatmap[..., None],
         IMG_SIZE
     ).numpy().squeeze()
 
-    # Memberikan warna pada heatmap
-    colored_heatmap = plt.get_cmap(
-        "jet"
-    )(
-        np.clip(
-            heatmap,
-            0,
-            1
-        )
+    colored_heatmap = plt.get_cmap("jet")(
+        np.clip(heatmap, 0, 1)
     )[..., :3]
 
-    # Normalisasi gambar asli
-    original = np.clip(
-        image / 255.0,
-        0,
-        1
-    )
+    original = np.clip(image / 255.0, 0, 1)
 
-    # Gabungkan gambar asli + heatmap
     overlay = np.clip(
-        (1 - alpha) * original
-        +
-        alpha * colored_heatmap,
+        (1 - alpha) * original + alpha * colored_heatmap,
         0,
         1
     )
@@ -279,9 +223,9 @@ def make_overlay(
 # KONFIGURASI HALAMAN
 # =========================
 st.set_page_config(
-    page_title="Deteksi T2DM",
+    page_title="Deteksi T2DM - Komparasi Model",
     page_icon="🔬",
-    layout="centered"
+    layout="wide"
 )
 
 
@@ -291,7 +235,6 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-
     .stApp {
         background:
             radial-gradient(
@@ -305,76 +248,38 @@ st.markdown(
                 transparent 42%
             ),
             #101827;
-
         color: white;
     }
-
-
-    .main .block-container {
-        max-width: 820px;
-        padding-top: 3rem;
-        padding-bottom: 3rem;
-    }
-
 
     [data-testid="stAlert"] {
         border-radius: 12px;
     }
 
-
     [data-testid="stFileUploaderDropzone"] {
-        background:
-            rgba(
-                255,
-                255,
-                255,
-                0.055
-            );
-
-        border:
-            1px dashed
-            rgba(
-                255,
-                255,
-                255,
-                0.25
-            );
-
+        background: rgba(255, 255, 255, 0.055);
+        border: 1px dashed rgba(255, 255, 255, 0.25);
         border-radius: 14px;
     }
-
 
     .stButton > button {
         width: 100%;
         height: 48px;
-
         border: none;
         border-radius: 11px;
-
-        background: linear-gradient(
-            90deg,
-            #1976d2,
-            #e53935
-        );
-
+        background: linear-gradient(90deg, #1976d2, #e53935);
         color: white;
-
         font-weight: 650;
     }
-
 
     .stButton > button:hover {
         color: white;
         border: none;
-
         filter: brightness(1.08);
     }
-
 
     header {
         background: transparent !important;
     }
-
     </style>
     """,
     unsafe_allow_html=True
@@ -382,21 +287,14 @@ st.markdown(
 
 
 # =========================
-# JUDUL
+# JUDUL & HEADER
 # =========================
-st.title(
-    "Deteksi T2DM dari Citra Lidah"
-)
-
+st.title("Deteksi T2DM dari Citra Lidah")
 st.write(
-    "Unggah citra lidah, kemudian tekan tombol **Deteksi** "
-    "untuk mendapatkan hasil klasifikasi Diabetes atau Non-Diabetes."
+    "Unggah citra lidah untuk melakukan inferensi perbandingan "
+    "menggunakan model **EfficientNet-B0** dan **MobileNetV2**."
 )
 
-
-# =========================
-# PERINGATAN
-# =========================
 st.warning(
     "Hasil prediksi model bukan diagnosis medis "
     "dan tidak menggantikan pemeriksaan tenaga kesehatan."
@@ -408,156 +306,153 @@ st.warning(
 # =========================
 uploaded = st.file_uploader(
     "Unggah Citra Lidah",
-    type=[
-        "jpg",
-        "jpeg",
-        "png"
-    ]
+    type=["jpg", "jpeg", "png"]
 )
 
 
 # =========================
-# JIKA GAMBAR SUDAH DIUPLOAD
+# JIKA GAMBAR DIUPLOAD
 # =========================
 if uploaded is not None:
 
     file_bytes = uploaded.getvalue()
+    display_img = Image.open(uploaded).convert("RGB")
 
-    display_img = Image.open(
-        uploaded
-    ).convert("RGB")
-
-
-    # =========================
-    # TAMPILKAN GAMBAR INPUT
-    # =========================
-    st.image(
-        display_img,
-        caption="Citra yang diunggah",
-        width=420
-    )
-
-
-    # =========================
-    # TOMBOL DETEKSI
-    # =========================
-    detect_button = st.button(
-        "Deteksi",
-        type="primary",
-        use_container_width=True
-    )
-
+    left_col, right_col = st.columns([1, 2])
+    with left_col:
+        st.image(
+            display_img,
+            caption="Citra Masukan",
+            use_container_width=True
+        )
+    with right_col:
+        st.write("### Siap untuk Evaluasi")
+        st.write(
+            "Citra akan diproses secara paralel ke dalam model "
+            "EfficientNet-B0 dan MobileNetV2 beserta kalkulasi Grad-CAM masing-masing."
+        )
+        detect_button = st.button(
+            "Jalankan Deteksi Komparasi",
+            type="primary",
+            use_container_width=True
+        )
 
     # =========================
     # PROSES DETEKSI
     # =========================
     if detect_button:
 
-        with st.spinner(
-            "Sedang melakukan deteksi dengan EfficientNet-B0..."
-        ):
+        with st.spinner("Memproses inferensi pada EfficientNet-B0 dan MobileNetV2..."):
 
-            # Load model
-            model = load_model()
+            # 1. Load kedua model
+            eff_model, mob_model = load_all_models()
 
-            # Preprocessing
-            image = preprocess(
-                file_bytes
-            )
+            # 2. Preprocessing gambar
+            image = preprocess(file_bytes)
 
-            # Prediksi
-            label, confidence, raw_prob = predict(
-                model,
-                image
-            )
+            # 3. Prediksi EfficientNet-B0
+            eff_label, eff_conf, _ = predict(eff_model, image)
+            eff_heatmap, eff_layer = gradcam(eff_model, image)
+            eff_colored, eff_overlay = make_overlay(image.numpy(), eff_heatmap)
 
-            # Grad-CAM
-            heatmap, layer_name = gradcam(
-                model,
-                image
-            )
-
-            # Membuat visualisasi
-            colored_heatmap, overlay = make_overlay(
-                image.numpy(),
-                heatmap
-            )
-
-
-        # ==========================================
-        # HASIL DETEKSI EFFICIENTNET-B0
-        # ==========================================
-        st.subheader("Hasil Inferensi EfficientNet-B0")
-
-        metric_col1, metric_col2 = st.columns(2)
-        with metric_col1:
-            st.metric(
-                label="Prediksi Kelas",
-                value=CLASS_NAMES[label]
-            )
-        with metric_col2:
-            st.metric(
-                label="Keyakinan (Confidence)",
-                value=f"{confidence * 100:.2f}%"
-            )
-
-        st.progress(min(max(confidence, 0.0), 1.0))
-
-        if label == 1:
-            st.error(f"Hasil Klasifikasi: **{CLASS_NAMES[label]}**")
-        else:
-            st.success(f"Hasil Klasifikasi: **{CLASS_NAMES[label]}**")
+            # 4. Prediksi MobileNetV2
+            mob_label, mob_conf, _ = predict(mob_model, image)
+            mob_heatmap, mob_layer = gradcam(mob_model, image)
+            mob_colored, mob_overlay = make_overlay(image.numpy(), mob_heatmap)
 
         st.markdown("---")
 
+        # ==========================================
+        # KOMPARASI 2 KOLOM (EFFICIENTNET vs MOBILENET)
+        # ==========================================
+        col_eff, col_mob = st.columns(2)
+
+        # -----------------------------
+        # KOLOM KIRI: EFFICIENTNET-B0
+        # -----------------------------
+        with col_eff:
+            st.subheader("EfficientNet-B0")
+
+            m1, m2 = st.columns(2)
+            with m1:
+                st.metric("Prediksi", CLASS_NAMES[eff_label])
+            with m2:
+                st.metric("Confidence", f"{eff_conf * 100:.2f}%")
+
+            st.progress(min(max(eff_conf, 0.0), 1.0))
+
+            if eff_label == 1:
+                st.error(f"Status: **{CLASS_NAMES[eff_label]}**")
+            else:
+                st.success(f"Status: **{CLASS_NAMES[eff_label]}**")
+
+            st.write("**Visualisasi Grad-CAM:**")
+            g_col1, g_col2 = st.columns(2)
+            with g_col1:
+                st.image(
+                    eff_colored,
+                    caption="Heatmap",
+                    use_container_width=True
+                )
+            with g_col2:
+                st.image(
+                    eff_overlay,
+                    caption="Overlay",
+                    use_container_width=True
+                )
+
+            st.caption(f"Layer Target: `{eff_layer}`")
+
+        # -----------------------------
+        # KOLOM KANAN: MOBILENETV2
+        # -----------------------------
+        with col_mob:
+            st.subheader("MobileNetV2")
+
+            m3, m4 = st.columns(2)
+            with m3:
+                st.metric("Prediksi", CLASS_NAMES[mob_label])
+            with m4:
+                st.metric("Confidence", f"{mob_conf * 100:.2f}%")
+
+            st.progress(min(max(mob_conf, 0.0), 1.0))
+
+            if mob_label == 1:
+                st.error(f"Status: **{CLASS_NAMES[mob_label]}**")
+            else:
+                st.success(f"Status: **{CLASS_NAMES[mob_label]}**")
+
+            st.write("**Visualisasi Grad-CAM:**")
+            g_col3, g_col4 = st.columns(2)
+            with g_col3:
+                st.image(
+                    mob_colored,
+                    caption="Heatmap",
+                    use_container_width=True
+                )
+            with g_col4:
+                st.image(
+                    mob_overlay,
+                    caption="Overlay",
+                    use_container_width=True
+                )
+
+            st.caption(f"Layer Target: `{mob_layer}`")
+
+        st.markdown("---")
 
         # ==========================================
-        # VISUALISASI KOMPARASI CITRA
+        # RINGKASAN PERBANDINGAN
         # ==========================================
-        st.subheader("Analisis Visual & Grad-CAM")
-        st.write(
-            "Perbandingan citra dari input asli, pemrosesan model, "
-            "hingga pemetaan area relevansi menggunakan Grad-CAM."
-        )
-
-        col_a, col_b, col_c, col_d = st.columns(4)
-
-        with col_a:
-            st.image(
-                display_img,
-                caption="1. Citra Asli (Upload)",
-                use_container_width=True
+        st.subheader("Ringkasan Komparasi Model")
+        
+        is_consensus = (eff_label == mob_label)
+        if is_consensus:
+            st.info(
+                f"**Konsensus Model:** Kedua model sepakat memprediksi citra ini sebagai **{CLASS_NAMES[eff_label]}**."
             )
-
-        with col_b:
-            st.image(
-                np.clip(image.numpy() / 255.0, 0, 1),
-                caption=f"2. Input Model ({IMG_SIZE[0]}x{IMG_SIZE[1]})",
-                use_container_width=True
+        else:
+            st.warning(
+                f"**Perbedaan Prediksi:** EfficientNet-B0 memprediksi **{CLASS_NAMES[eff_label]}** ({eff_conf*100:.1f}%), "
+                f"sedangkan MobileNetV2 memprediksi **{CLASS_NAMES[mob_label]}** ({mob_conf*100:.1f}%)."
             )
-
-        with col_c:
-            st.image(
-                colored_heatmap,
-                caption="3. Heatmap Grad-CAM",
-                use_container_width=True
-            )
-
-        with col_d:
-            st.image(
-                overlay,
-                caption="4. Overlay Grad-CAM",
-                use_container_width=True
-            )
-
-        st.caption(
-            f"Feature layer EfficientNet-B0 yang dianalisis: `{layer_name}`"
-        )
-
-        st.info(
-            "Area berwarna merah atau kuning menunjukkan bagian "
-            "yang relatif memberikan kontribusi lebih besar terhadap "
-            "keputusan model. Area biru menunjukkan kontribusi yang "
-            "relatif lebih rendah. Grad-CAM bukan bukti bahwa area "
-            "tersebut merupakan ciri klinis Diabetes."
-        )

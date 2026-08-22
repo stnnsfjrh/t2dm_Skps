@@ -7,6 +7,11 @@ import tensorflow as tf
 from PIL import Image
 from tensorflow import keras
 
+try:
+    import tf_keras as legacy_keras
+except ImportError:
+    legacy_keras = None
+
 
 # =========================
 # KONFIGURASI
@@ -24,7 +29,7 @@ CLASS_NAMES = [
 
 
 # =========================
-# LOAD MODEL
+# LOAD MODEL DENGAN FALLBACK
 # =========================
 @st.cache_resource
 def load_efficientnet():
@@ -32,20 +37,30 @@ def load_efficientnet():
         st.error(f"File model tidak ditemukan: {EFFICIENTNET_PATH.name}")
         return None
 
-    # Cek ukuran file untuk mendeteksi pointer Git LFS palsu
-    if EFFICIENTNET_PATH.stat().st_size < 1000:
+    # Deteksi pointer teks Git LFS yang korup
+    if EFFICIENTNET_PATH.stat().st_size < 2000:
         st.error(
             f"File `{EFFICIENTNET_PATH.name}` berukuran terlalu kecil ({EFFICIENTNET_PATH.stat().st_size} bytes). "
-            "Ini biasanya terjadi jika file di-upload menggunakan Git LFS dan belum terunduh utuh di repository."
+            "File tersebut hanya pointer teks Git LFS. Silakan unggah file binary asli ke GitHub."
         )
         return None
 
     try:
-        return keras.models.load_model(EFFICIENTNET_PATH, compile=False, safe_mode=False)
+        return keras.models.load_model(
+            EFFICIENTNET_PATH,
+            compile=False,
+            safe_mode=False
+        )
     except Exception:
         if legacy_keras is not None:
-            return legacy_keras.models.load_model(str(EFFICIENTNET_PATH), compile=False)
-        return tf.keras.models.load_model(str(EFFICIENTNET_PATH), compile=False)
+            return legacy_keras.models.load_model(
+                str(EFFICIENTNET_PATH),
+                compile=False
+            )
+        return tf.keras.models.load_model(
+            str(EFFICIENTNET_PATH),
+            compile=False
+        )
 
 
 @st.cache_resource
@@ -54,27 +69,35 @@ def load_mobilenet():
         st.error(f"File model tidak ditemukan: {MOBILENET_PATH.name}")
         return None
 
-    # Cek ukuran file untuk mendeteksi pointer Git LFS palsu
-    if MOBILENET_PATH.stat().st_size < 1000:
+    # Deteksi pointer teks Git LFS yang korup
+    if MOBILENET_PATH.stat().st_size < 2000:
         st.error(
             f"File `{MOBILENET_PATH.name}` berukuran terlalu kecil ({MOBILENET_PATH.stat().st_size} bytes). "
-            "File tersebut hanya pointer teks Git LFS, bukan binary model asli. Silakan upload ulang file .keras asli ke GitHub."
+            "File tersebut hanya pointer teks Git LFS. Silakan unggah file binary asli ke GitHub."
         )
         return None
 
-    # 1. Coba load menggunakan legacy tf_keras (Keras 2 bridge)
+    # Coba loader legacy Keras terlebih dahulu
     if legacy_keras is not None:
         try:
-            return legacy_keras.models.load_model(str(MOBILENET_PATH), compile=False)
+            return legacy_keras.models.load_model(
+                str(MOBILENET_PATH),
+                compile=False
+            )
         except Exception:
             pass
 
-    # 2. Coba load via Keras 3 dengan safe_mode=False
     try:
-        return keras.models.load_model(MOBILENET_PATH, compile=False, safe_mode=False)
-    except Exception as err:
-        st.error(f"Gagal memuat MobileNetV2: {str(err)}")
-        return None
+        return keras.models.load_model(
+            MOBILENET_PATH,
+            compile=False,
+            safe_mode=False
+        )
+    except Exception:
+        return tf.keras.models.load_model(
+            str(MOBILENET_PATH),
+            compile=False
+        )
 
 
 # =========================
@@ -148,7 +171,7 @@ def last_feature_layer(base_model):
 
 
 # =========================
-# GRAD-CAM
+# GRAD-CAM GENERIK
 # =========================
 def gradcam(model, image):
 
@@ -314,7 +337,7 @@ st.markdown(
 # =========================
 st.title("Deteksi T2DM dari Citra Lidah")
 st.write(
-    "Unggah citra lidah untuk melakukan inferensi perbandingan "
+    "Unggah citra lidah untuk melakukan analisis komparasi "
     "menggunakan model **EfficientNet-B0** dan **MobileNetV2**."
 )
 
@@ -367,12 +390,11 @@ if uploaded is not None:
 
         with st.spinner("Memuat model dan melakukan inferensi..."):
 
-            # 1. Memuat model
+            # 1. Load model secara terpisah
             eff_model = load_efficientnet()
             mob_model = load_mobilenet()
 
             if eff_model is None or mob_model is None:
-                st.error("Salah satu atau kedua model gagal dimuat. Periksa keberadaan file .keras di direktori.")
                 st.stop()
 
             # 2. Preprocessing
@@ -470,7 +492,7 @@ if uploaded is not None:
         st.markdown("---")
 
         # ==========================================
-        # RINGKASAN PERBANDINGAN
+        # RINGKASAN KONSENSUS
         # ==========================================
         st.subheader("Ringkasan Konsensus Model")
         

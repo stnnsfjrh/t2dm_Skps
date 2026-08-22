@@ -529,3 +529,4 @@ if uploaded is not None:
                 f"**Perbedaan Prediksi:** EfficientNet-B0 mendeteksi **{CLASS_NAMES[eff_label]}** ({eff_conf*100:.1f}%), "
                 f"sedangkan MobileNetV2 mendeteksi **{CLASS_NAMES[mob_label]}** ({mob_conf*100:.1f}%)."
             )
+            

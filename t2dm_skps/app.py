@@ -194,75 +194,79 @@ def get_target_conv_layer(model):
 # =========================
 # GRAD-CAM
 # =========================
-def gradcam(model, image):
-
+def compute_gradcam(model, image):
     batch = image[None, ...]
-    container_model, layer_name = get_target_conv_layer(model)
 
-    if container_model is None or layer_name is None:
-        return np.zeros((IMG_SIZE[0], IMG_SIZE[1])), "Not Found"
+    # 1. Cari sub-model backbone (Base Model) jika model berupa pipeline bertingkat
+    base_model = None
+    for layer in model.layers:
+        if isinstance(layer, (keras.Model, tf.keras.Model)):
+            base_model = layer
+            break
 
-    try:
-        if container_model != model:
-            sub_target_layer = container_model.get_layer(layer_name)
-            sub_feature_extractor = keras.Model(
-                inputs=container_model.inputs,
-                outputs=[sub_target_layer.output, container_model.output]
-            )
+    # KASUS A: Model memiliki sub-model (seperti arsitektur kode awal Anda)
+    if base_model is not None:
+        target_layer = last_feature_layer(base_model)
+        feature_model = keras.Model(
+            inputs=base_model.input,
+            outputs=[target_layer.output, base_model.output]
+        )
 
-            with tf.GradientTape() as tape:
-                x = batch
-                for l in model.layers:
-                    if l == container_model:
-                        break
-                    x = l(x, training=False)
+        with tf.GradientTape() as tape:
+            # Lewati layer sebelum base_model (misal: augmentation)
+            x = batch
+            for layer in model.layers:
+                if layer == base_model:
+                    break
+                x = layer(x, training=False)
 
-                conv_output, base_out = sub_feature_extractor(x, training=False)
+            conv_output, features = feature_model(x, training=False)
 
-                x = base_out
-                passed_base = False
-                for l in model.layers:
-                    if passed_base:
-                        x = l(x, training=False)
-                    if l == container_model:
-                        passed_base = True
+            # Teruskan ke layer setelah base_model (GAP, Dropout, Classifier)
+            x = features
+            found_base = False
+            for layer in model.layers:
+                if found_base:
+                    x = layer(x, training=False)
+                if layer == base_model:
+                    found_base = True
 
-                prob = x[:, 0]
-                pred_label = tf.cast(prob >= THRESHOLD, tf.int32)
-                score = tf.where(pred_label == 1, prob, 1.0 - prob)
+            probability = x[:, 0]
+            predicted_label = tf.cast(probability >= THRESHOLD, tf.int32)
+            score = tf.where(predicted_label == 1, probability, 1.0 - probability)
 
-            grads = tape.gradient(score, conv_output)
+        gradients = tape.gradient(score, conv_output)
 
-        else:
-            target_layer = model.get_layer(layer_name)
-            grad_model = keras.Model(
-                inputs=model.inputs,
-                outputs=[target_layer.output, model.output]
-            )
-            with tf.GradientTape() as tape:
-                conv_output, preds = grad_model(batch, training=False)
-                prob = preds[:, 0]
-                pred_label = tf.cast(prob >= THRESHOLD, tf.int32)
-                score = tf.where(pred_label == 1, prob, 1.0 - prob)
+    # KASUS B: Model merupakan Flat Functional / Sequential Graph
+    else:
+        target_layer = last_feature_layer(model)
+        grad_model = keras.Model(
+            inputs=model.inputs,
+            outputs=[target_layer.output, model.outputs[0]]
+        )
 
-            grads = tape.gradient(score, conv_output)
+        with tf.GradientTape() as tape:
+            conv_output, predictions = grad_model(batch, training=False)
+            probability = predictions[:, 0]
+            predicted_label = tf.cast(probability >= THRESHOLD, tf.int32)
+            score = tf.where(predicted_label == 1, probability, 1.0 - probability)
 
-        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-        conv_output_val = conv_output[0]
+        gradients = tape.gradient(score, conv_output)
 
-        heatmap = conv_output_val @ pooled_grads[..., tf.newaxis]
-        heatmap = tf.squeeze(heatmap)
-        heatmap = tf.maximum(heatmap, 0.0)
+    # Kalkulasi bobot gradien per channel
+    weights = tf.reduce_mean(gradients, axis=(1, 2))
+    
+    # Linear combination feature map * weights
+    heatmap = tf.reduce_sum(conv_output * weights[:, None, None, :], axis=-1)
+    
+    # ReLU
+    heatmap = tf.nn.relu(heatmap)
+    
+    # Normalisasi 0 - 1
+    max_val = tf.reduce_max(heatmap, axis=(1, 2), keepdims=True)
+    heatmap = heatmap / (max_val + tf.keras.backend.epsilon())
 
-        max_val = tf.math.reduce_max(heatmap)
-        if max_val > 0:
-            heatmap = heatmap / max_val
-
-        return heatmap.numpy(), layer_name
-
-    except Exception:
-        # Fallback jika model menggunakan direct Functional input
-        return np.zeros((7, 7), dtype=np.float32), "Conv-Target"
+    return heatmap[0].numpy(), target_layer.name
 
 
 # =========================

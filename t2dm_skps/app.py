@@ -345,7 +345,8 @@ if uploaded is not None:
         with st.spinner("Memproses inferensi pada EfficientNet-B0 dan MobileNetV2..."):
 
             # 1. Load kedua model
-            eff_model, mob_model = load_all_models()
+            eff_model = load_efficientnet()
+            mob_model = load_mobilenet()
 
             # 2. Preprocessing gambar
             image = preprocess(file_bytes)

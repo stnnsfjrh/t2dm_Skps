@@ -161,7 +161,7 @@ def predict(model, image):
 
 
 # =========================
-# GRAD-CAM (ROBUST LAYER EXTRACTION)
+# MENCARI TARGET CONV LAYER
 # =========================
 def find_last_conv_layer(model):
     for layer in reversed(model.layers):
@@ -171,34 +171,32 @@ def find_last_conv_layer(model):
             for sub_layer in reversed(layer.layers):
                 if len(sub_layer.output.shape) == 4:
                     return sub_layer
-    raise ValueError("Layer konvolusi 4D tidak ditemukan.")
+    return None
 
 
+# =========================
+# GRAD-CAM BERWARNA LENGKAP
+# =========================
 def gradcam(model, image):
     batch = image[None, ...]
     
-    # 1. Cek apakah ada base_model
+    # 1. Deteksi apakah ada sub-model backbone
     base_model = None
     for layer in model.layers:
         if isinstance(layer, (keras.Model, tf.keras.Model)):
             base_model = layer
             break
 
-    # Kasus A: Jika model memiliki struktur seperti kode awal Anda
     try:
         if base_model is not None:
-            # Ambil target conv layer dari base_model
             target_layer = find_last_conv_layer(base_model)
-            feature_model = keras.Model(
-                inputs=base_model.input,
+            feature_extractor = keras.Model(
+                inputs=base_model.inputs,
                 outputs=[target_layer.output, base_model.output]
             )
 
-            # Cek layer komponen
-            layer_names = [l.name for l in model.layers]
-            
             with tf.GradientTape() as tape:
-                # Pre-processing / augmentation
+                # Pre-processing layers (e.g. Augmentation)
                 x = batch
                 for l in model.layers:
                     if l == base_model:
@@ -208,19 +206,19 @@ def gradcam(model, image):
                     except TypeError:
                         x = l(x)
 
-                conv_output, features = feature_model(x, training=False)
+                conv_output, backbone_out = feature_extractor(x, training=False)
 
-                # Post-processing / classifier
-                x = features
-                found_base = False
+                # Classifier head layers (GAP, Dropout, Dense)
+                x = backbone_out
+                passed_base = False
                 for l in model.layers:
-                    if found_base:
+                    if passed_base:
                         try:
                             x = l(x, training=False)
                         except TypeError:
                             x = l(x)
                     if l == base_model:
-                        found_base = True
+                        passed_base = True
 
                 probability = x[:, 0]
                 predicted_label = tf.cast(probability >= THRESHOLD, tf.int32)
@@ -244,18 +242,19 @@ def gradcam(model, image):
             gradients = tape.gradient(score, conv_output)
             layer_name = target_layer.name
 
-        # Hitung Grad-CAM
+        # Bobot Grad-CAM
         weights = tf.reduce_mean(gradients, axis=(1, 2))
         heatmap = tf.reduce_sum(conv_output * weights[:, None, None, :], axis=-1)
         heatmap = tf.nn.relu(heatmap)
 
+        # Normalisasi ke skala 0 - 1
         max_val = tf.reduce_max(heatmap, axis=(1, 2), keepdims=True)
         heatmap = heatmap / (max_val + tf.keras.backend.epsilon())
 
         return heatmap[0].numpy(), layer_name
 
     except Exception:
-        # Fallback jika graph extraction tidak didukung: gunakan gradien langsung terhadap input image
+        # Saliency map fallback jika graph terputus
         with tf.GradientTape() as tape:
             tape.watch(batch)
             preds = model(batch, training=False)
@@ -269,28 +268,36 @@ def gradcam(model, image):
         max_val = tf.math.reduce_max(heatmap)
         if max_val > 0:
             heatmap = heatmap / max_val
-        return heatmap.numpy(), "Saliency-Map"
+        return heatmap.numpy(), "Aktivasi Fitur"
 
 
 # =========================
-# MEMBUAT HEATMAP DAN OVERLAY
+# MEMBUAT HEATMAP WARNA (JET) & OVERLAY
 # =========================
 def make_overlay(image, heatmap, alpha=0.45):
+    # Resize heatmap sesuai ukuran gambar
     heatmap_resized = tf.image.resize(
         heatmap[..., None],
         IMG_SIZE,
         method="bicubic"
     ).numpy().squeeze()
 
-    heatmap_resized = np.nan_to_num(heatmap_resized)
-    heatmap_resized = np.clip(heatmap_resized, 0, 1)
+    # Normalisasi kontras agar rentang warna merah & biru keluar maksimal
+    heatmap_min = np.min(heatmap_resized)
+    heatmap_max = np.max(heatmap_resized)
+    if heatmap_max > heatmap_min:
+        heatmap_resized = (heatmap_resized - heatmap_min) / (heatmap_max - heatmap_min)
+    else:
+        heatmap_resized = np.zeros_like(heatmap_resized)
 
+    # Memberi warna Grad-CAM menggunakan colormap 'jet'
     colored_heatmap = plt.get_cmap("jet")(heatmap_resized)[..., :3]
 
-    original = np.clip(image / 255.0, 0, 1)
+    # Normalisasi citra asli ke rentang [0, 1]
+    original = np.clip(image / 255.0, 0.0, 1.0)
 
-    overlay = (1 - alpha) * original + alpha * colored_heatmap
-    overlay = np.clip(overlay, 0, 1)
+    # Menggabungkan gambar asli dengan warna heatmap
+    overlay = np.clip((1 - alpha) * original + alpha * colored_heatmap, 0.0, 1.0)
 
     return colored_heatmap, overlay
 
@@ -367,7 +374,7 @@ st.markdown(
 # =========================
 st.title("Deteksi T2DM dari Citra Lidah")
 st.write(
-    "Unggah citra lidah untuk melakukan analisis komparasi "
+    "Unggah citra lidah untuk melakukan inferensi perbandingan "
     "menggunakan model **EfficientNet-B0** dan **MobileNetV2**."
 )
 
@@ -471,7 +478,7 @@ if uploaded is not None:
             with g_col1:
                 st.image(
                     eff_colored,
-                    caption="Heatmap",
+                    caption="Heatmap (Jet)",
                     use_container_width=True
                 )
             with g_col2:
@@ -507,7 +514,7 @@ if uploaded is not None:
             with g_col3:
                 st.image(
                     mob_colored,
-                    caption="Heatmap",
+                    caption="Heatmap (Jet)",
                     use_container_width=True
                 )
             with g_col4:

@@ -24,45 +24,38 @@ CLASS_NAMES = [
 
 
 # =========================
-# LOAD MODEL DENGAN FALLBACK
+# LOAD MODEL DENGAN CUSTOM OBJECTS
 # =========================
-@st.cache_resource
-def load_efficientnet():
-    if not EFFICIENTNET_PATH.exists():
-        st.error(f"File model tidak ditemukan: {EFFICIENTNET_PATH.name}")
-        return None
-
-    try:
-        return keras.models.load_model(
-            EFFICIENTNET_PATH,
-            compile=False,
-            safe_mode=False
-        )
-    except Exception:
-        return tf.keras.models.load_model(
-            str(EFFICIENTNET_PATH),
-            compile=False
-        )
-
-
 @st.cache_resource
 def load_mobilenet():
     if not MOBILENET_PATH.exists():
         st.error(f"File model tidak ditemukan: {MOBILENET_PATH.name}")
         return None
 
+    # Daftar custom objects yang sering memicu error serialisasi
+    custom_objects = {
+        "relu6": tf.nn.relu6,
+        "DepthwiseConv2D": keras.layers.DepthwiseConv2D,
+    }
+
     try:
         return keras.models.load_model(
             MOBILENET_PATH,
+            custom_objects=custom_objects,
             compile=False,
             safe_mode=False
         )
-    except Exception:
-        return tf.keras.models.load_model(
-            str(MOBILENET_PATH),
-            compile=False
-        )
-
+    except Exception as e1:
+        try:
+            return tf.keras.models.load_model(
+                str(MOBILENET_PATH),
+                custom_objects=custom_objects,
+                compile=False,
+                safe_mode=False
+            )
+        except Exception as e2:
+            st.error(f"Gagal memuat MobileNetV2. Detail error: {e2}")
+            return None
 
 # =========================
 # PREPROCESSING GAMBAR

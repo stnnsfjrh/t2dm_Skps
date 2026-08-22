@@ -56,7 +56,6 @@ def load_mobilenet():
         st.error(f"File model tidak ditemukan: {MOBILENET_PATH.name}")
         return None
 
-    # 1. Coba load langsung
     try:
         return keras.models.load_model(
             MOBILENET_PATH,
@@ -66,7 +65,6 @@ def load_mobilenet():
     except Exception:
         pass
 
-    # 2. Rekonstruksi arsitektur nested dan ekstraksi weights internal
     try:
         base_model = keras.applications.MobileNetV2(
             input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3),
@@ -97,7 +95,6 @@ def load_mobilenet():
     except Exception:
         pass
 
-    # 3. Fallback jika deserialisasi gagal
     base_model = keras.applications.MobileNetV2(
         input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3),
         include_top=False,
@@ -164,78 +161,127 @@ def predict(model, image):
 
 
 # =========================
-# CARI LAYER 4D TERAKHIR
-# =========================
-def get_last_conv_layer(model):
-    """Mencari layer 4D terakhir dan mengembalikan referensi objek layernya."""
-    # 1. Cek apakah ada sub-model (base model)
-    for layer in reversed(model.layers):
-        if hasattr(layer, "layers"):
-            for sub_layer in reversed(layer.layers):
-                if len(sub_layer.output.shape) == 4:
-                    return sub_layer
-        elif len(layer.output.shape) == 4:
-            return layer
-    raise ValueError("Layer 4D (konvolusi) tidak ditemukan.")
-
-
-# =========================
-# GRAD-CAM BERSIH & KOMPATIBEL
+# GRAD-CAM FORWARD-TRACE (ZERO ERROR)
 # =========================
 def gradcam(model, image):
     batch = image[None, ...]
-    target_layer = get_last_conv_layer(model)
 
-    # Membangun extractor dari inputs asli ke target_layer.output dan model.output
-    # Pendekatan ini aman untuk Keras 2 dan Keras 3 tanpa memotong intermediate sub-graph
-    grad_model = keras.Model(
-        inputs=model.inputs,
-        outputs=[target_layer.output, model.output]
-    )
+    # 1. Identifikasi apakah model memiliki Base Model bertingkat
+    base_model = None
+    for layer in model.layers:
+        if isinstance(layer, (keras.Model, tf.keras.Model)):
+            base_model = layer
+            break
 
-    with tf.GradientTape() as tape:
-        conv_output, predictions = grad_model(batch, training=False)
-        probability = predictions[:, 0]
-        predicted_label = tf.cast(probability >= THRESHOLD, tf.int32)
-        score = tf.where(predicted_label == 1, probability, 1.0 - probability)
+    # KASUS A: Model Nested (Memiliki Base Model Backbone)
+    if base_model is not None:
+        # Cari layer 4D terakhir di base model
+        target_layer = None
+        for l in reversed(base_model.layers):
+            try:
+                if len(l.output.shape) == 4:
+                    target_layer = l
+                    break
+            except Exception:
+                pass
 
-    # Bobot gradien terhadap feature map konvolusi
-    gradients = tape.gradient(score, conv_output)
-    weights = tf.reduce_mean(gradients, axis=(1, 2))
+        feature_submodel = keras.Model(
+            inputs=base_model.inputs,
+            outputs=[target_layer.output, base_model.output]
+        )
 
-    # Kombinasi linear antara feature map dan bobot
-    heatmap = tf.reduce_sum(conv_output * weights[:, None, None, :], axis=-1)
-    heatmap = tf.nn.relu(heatmap)
+        with tf.GradientTape() as tape:
+            x = batch
+            # Lewati layer pra-backbone (e.g. Augmentation / Rescaling)
+            for l in model.layers:
+                if l == base_model:
+                    break
+                x = l(x, training=False)
 
-    # Normalisasi [0, 1]
-    max_val = tf.reduce_max(heatmap, axis=(1, 2), keepdims=True)
-    heatmap = heatmap / (max_val + tf.keras.backend.epsilon())
+            conv_output, backbone_out = feature_submodel(x, training=False)
 
-    return heatmap[0].numpy(), target_layer.name
+            # Lewati layer pasca-backbone (GAP, Dropout, Dense)
+            x = backbone_out
+            passed_base = False
+            for l in model.layers:
+                if passed_base:
+                    x = l(x, training=False)
+                if l == base_model:
+                    passed_base = True
+
+            prob = x[:, 0]
+            pred_label = tf.cast(prob >= THRESHOLD, tf.int32)
+            score = tf.where(pred_label == 1, prob, 1.0 - prob)
+
+        grads = tape.gradient(score, conv_output)
+
+    # KASUS B: Model Sequential / Functional Biasa
+    else:
+        target_layer = None
+        for l in reversed(model.layers):
+            try:
+                if len(l.output.shape) == 4:
+                    target_layer = l
+                    break
+            except Exception:
+                pass
+
+        # Split eksekusi: input -> conv -> output
+        feature_submodel = keras.Model(inputs=model.inputs, outputs=target_layer.output)
+
+        with tf.GradientTape() as tape:
+            conv_output = feature_submodel(batch, training=False)
+            tape.watch(conv_output)
+
+            # Forward sisa layer setelah layer target
+            x = conv_output
+            passed_target = False
+            for l in model.layers:
+                if passed_target:
+                    x = l(x, training=False)
+                if l.name == target_layer.name:
+                    passed_target = True
+
+            prob = x[:, 0]
+            pred_label = tf.cast(prob >= THRESHOLD, tf.int32)
+            score = tf.where(pred_label == 1, prob, 1.0 - prob)
+
+        grads = tape.gradient(score, conv_output)
+
+    # Hitung bobot rata-rata Grad-CAM
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+    conv_output_0 = conv_output[0]
+
+    # Linear combination
+    heatmap = conv_output_0 @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+    heatmap = tf.maximum(heatmap, 0.0)
+
+    # Normalisasi 0 - 1
+    max_val = tf.math.reduce_max(heatmap)
+    if max_val > 0:
+        heatmap = heatmap / max_val
+
+    return heatmap.numpy(), target_layer.name
 
 
 # =========================
 # MEMBUAT HEATMAP DAN OVERLAY
 # =========================
 def make_overlay(image, heatmap, alpha=0.45):
-    # Resize heatmap ke ukuran citra input
     heatmap_resized = tf.image.resize(
         heatmap[..., None],
         IMG_SIZE,
         method="bicubic"
     ).numpy().squeeze()
 
-    # Pastikan rentang nilai aman [0, 1]
     heatmap_resized = np.nan_to_num(heatmap_resized)
     heatmap_resized = np.clip(heatmap_resized, 0, 1)
 
-    # Color mapping Jet (Merah: Area Relevan, Biru: Non-relevan)
     colored_heatmap = plt.get_cmap("jet")(heatmap_resized)[..., :3]
 
-    # Citra asli ternormalisasi [0, 1]
     original = np.clip(image / 255.0, 0, 1)
 
-    # Blending
     overlay = (1 - alpha) * original + alpha * colored_heatmap
     overlay = np.clip(overlay, 0, 1)
 

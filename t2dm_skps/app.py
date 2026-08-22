@@ -197,14 +197,14 @@ def get_target_conv_layer(model):
 def gradcam(model, image):
     batch = image[None, ...]
 
-    # 1. Cari sub-model backbone (Base Model) jika model berupa pipeline bertingkat
+    # 1. Cari sub-model backbone jika arsitektur bertingkat
     base_model = None
     for layer in model.layers:
         if isinstance(layer, (keras.Model, tf.keras.Model)):
             base_model = layer
             break
 
-    # KASUS A: Model memiliki sub-model (seperti arsitektur kode awal Anda)
+    # KASUS A: Model memiliki sub-model backbone
     if base_model is not None:
         target_layer = last_feature_layer(base_model)
         feature_model = keras.Model(
@@ -213,7 +213,6 @@ def gradcam(model, image):
         )
 
         with tf.GradientTape() as tape:
-            # Lewati layer sebelum base_model (misal: augmentation)
             x = batch
             for layer in model.layers:
                 if layer == base_model:
@@ -222,7 +221,6 @@ def gradcam(model, image):
 
             conv_output, features = feature_model(x, training=False)
 
-            # Teruskan ke layer setelah base_model (GAP, Dropout, Classifier)
             x = features
             found_base = False
             for layer in model.layers:
@@ -237,7 +235,7 @@ def gradcam(model, image):
 
         gradients = tape.gradient(score, conv_output)
 
-    # KASUS B: Model merupakan Flat Functional / Sequential Graph
+    # KASUS B: Model flat Functional / Sequential
     else:
         target_layer = last_feature_layer(model)
         grad_model = keras.Model(
@@ -253,13 +251,11 @@ def gradcam(model, image):
 
         gradients = tape.gradient(score, conv_output)
 
-    # Kalkulasi bobot gradien per channel
+    # Hitung bobot rata-rata Grad-CAM
     weights = tf.reduce_mean(gradients, axis=(1, 2))
     
-    # Linear combination feature map * weights
+    # Linear combination
     heatmap = tf.reduce_sum(conv_output * weights[:, None, None, :], axis=-1)
-    
-    # ReLU
     heatmap = tf.nn.relu(heatmap)
     
     # Normalisasi 0 - 1

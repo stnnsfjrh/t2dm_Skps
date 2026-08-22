@@ -164,86 +164,50 @@ def predict(model, image):
 
 
 # =========================
-# MENCARI LAYER 4D TERAKHIR
+# CARI LAYER 4D TERAKHIR
 # =========================
-def last_feature_layer(base_model):
-    for layer in reversed(base_model.layers):
-        try:
-            if len(layer.output.shape) == 4:
-                return layer
-        except Exception:
-            pass
-    raise ValueError("Layer feature map 4D tidak ditemukan.")
+def get_last_conv_layer(model):
+    """Mencari layer 4D terakhir dan mengembalikan referensi objek layernya."""
+    # 1. Cek apakah ada sub-model (base model)
+    for layer in reversed(model.layers):
+        if hasattr(layer, "layers"):
+            for sub_layer in reversed(layer.layers):
+                if len(sub_layer.output.shape) == 4:
+                    return sub_layer
+        elif len(layer.output.shape) == 4:
+            return layer
+    raise ValueError("Layer 4D (konvolusi) tidak ditemukan.")
 
 
 # =========================
-# GRAD-CAM
+# GRAD-CAM BERSIH & KOMPATIBEL
 # =========================
 def gradcam(model, image):
     batch = image[None, ...]
+    target_layer = get_last_conv_layer(model)
 
-    # 1. Cari sub-model backbone jika arsitektur bertingkat
-    base_model = None
-    for layer in model.layers:
-        if isinstance(layer, (keras.Model, tf.keras.Model)):
-            base_model = layer
-            break
+    # Membangun extractor dari inputs asli ke target_layer.output dan model.output
+    # Pendekatan ini aman untuk Keras 2 dan Keras 3 tanpa memotong intermediate sub-graph
+    grad_model = keras.Model(
+        inputs=model.inputs,
+        outputs=[target_layer.output, model.output]
+    )
 
-    # KASUS A: Model memiliki sub-model backbone
-    if base_model is not None:
-        target_layer = last_feature_layer(base_model)
-        feature_model = keras.Model(
-            inputs=base_model.input,
-            outputs=[target_layer.output, base_model.output]
-        )
+    with tf.GradientTape() as tape:
+        conv_output, predictions = grad_model(batch, training=False)
+        probability = predictions[:, 0]
+        predicted_label = tf.cast(probability >= THRESHOLD, tf.int32)
+        score = tf.where(predicted_label == 1, probability, 1.0 - probability)
 
-        with tf.GradientTape() as tape:
-            x = batch
-            for layer in model.layers:
-                if layer == base_model:
-                    break
-                x = layer(x, training=False)
-
-            conv_output, features = feature_model(x, training=False)
-
-            x = features
-            found_base = False
-            for layer in model.layers:
-                if found_base:
-                    x = layer(x, training=False)
-                if layer == base_model:
-                    found_base = True
-
-            probability = x[:, 0]
-            predicted_label = tf.cast(probability >= THRESHOLD, tf.int32)
-            score = tf.where(predicted_label == 1, probability, 1.0 - probability)
-
-        gradients = tape.gradient(score, conv_output)
-
-    # KASUS B: Model flat Functional / Sequential
-    else:
-        target_layer = last_feature_layer(model)
-        grad_model = keras.Model(
-            inputs=model.inputs,
-            outputs=[target_layer.output, model.outputs[0]]
-        )
-
-        with tf.GradientTape() as tape:
-            conv_output, predictions = grad_model(batch, training=False)
-            probability = predictions[:, 0]
-            predicted_label = tf.cast(probability >= THRESHOLD, tf.int32)
-            score = tf.where(predicted_label == 1, probability, 1.0 - probability)
-
-        gradients = tape.gradient(score, conv_output)
-
-    # Hitung bobot rata-rata Grad-CAM
+    # Bobot gradien terhadap feature map konvolusi
+    gradients = tape.gradient(score, conv_output)
     weights = tf.reduce_mean(gradients, axis=(1, 2))
 
-    # Linear combination
+    # Kombinasi linear antara feature map dan bobot
     heatmap = tf.reduce_sum(conv_output * weights[:, None, None, :], axis=-1)
     heatmap = tf.nn.relu(heatmap)
 
-    # Normalisasi 0 - 1
+    # Normalisasi [0, 1]
     max_val = tf.reduce_max(heatmap, axis=(1, 2), keepdims=True)
     heatmap = heatmap / (max_val + tf.keras.backend.epsilon())
 
@@ -253,19 +217,27 @@ def gradcam(model, image):
 # =========================
 # MEMBUAT HEATMAP DAN OVERLAY
 # =========================
-def make_overlay(image, heatmap, alpha=0.4):
+def make_overlay(image, heatmap, alpha=0.45):
+    # Resize heatmap ke ukuran citra input
     heatmap_resized = tf.image.resize(
         heatmap[..., None],
         IMG_SIZE,
-        method="bilinear"
+        method="bicubic"
     ).numpy().squeeze()
 
-    colored_heatmap = plt.get_cmap("jet")(
-        np.clip(heatmap_resized, 0, 1)
-    )[..., :3]
+    # Pastikan rentang nilai aman [0, 1]
+    heatmap_resized = np.nan_to_num(heatmap_resized)
+    heatmap_resized = np.clip(heatmap_resized, 0, 1)
 
+    # Color mapping Jet (Merah: Area Relevan, Biru: Non-relevan)
+    colored_heatmap = plt.get_cmap("jet")(heatmap_resized)[..., :3]
+
+    # Citra asli ternormalisasi [0, 1]
     original = np.clip(image / 255.0, 0, 1)
-    overlay = np.clip((1 - alpha) * original + alpha * colored_heatmap, 0, 1)
+
+    # Blending
+    overlay = (1 - alpha) * original + alpha * colored_heatmap
+    overlay = np.clip(overlay, 0, 1)
 
     return colored_heatmap, overlay
 
